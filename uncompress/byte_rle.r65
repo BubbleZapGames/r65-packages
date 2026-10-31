@@ -1,0 +1,36 @@
+//! Byte RLE decoder: the format `r65x packer pack -x byte_rle` writes.
+//!
+//! The first byte is the tag, a value the data never holds. Every other
+//! byte is a literal, except that the tag and a count n repeat the last
+//! literal n more times. The tag and a count of 0 end the stream.
+//!
+//! Neither the stream nor the output may cross a 64KB bank boundary.
+
+/// Decode the byte RLE stream at `src` into `dst`, returning the number of
+/// bytes written.
+fn byte_rle_uncompress(src: far *u8, dst: far *u8) -> u16 {
+    let start = dst;
+    let tag: u8 = src[0];
+    let mut last: u8 = tag;
+    src += 1;
+    loop {
+        // Literals up to the next tag.
+        let mut i: u16 = 0;
+        loop {
+            let c: u8 = src[i];
+            if c == tag { break; }
+            dst[i] = c;
+            i++;
+        }
+        if i != 0 {
+            last = src[i - 1];
+            src += i;
+            dst += i;
+        }
+        let n: u16 = src[1] as u16;
+        src += 2;
+        if n == 0 { return (dst - start) as u16; }
+        for k in 0..n { dst[k] = last; }
+        dst += n;
+    }
+}

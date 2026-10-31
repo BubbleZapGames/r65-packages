@@ -1,0 +1,40 @@
+//! RLE2 decoder: the format `r65x packer pack -x rle2` writes.
+//!
+//! The data is split in two planes, the even bytes then the odd bytes, and
+//! each plane is coded as RLE1 (see `rle1.r65`) with no end marker. Planar
+//! data whose two halves repeat differently, such as 2bpp tiles or
+//! 16-bit tilemap entries, packs better this way.
+//!
+//! Neither the stream nor the output may cross a 64KB bank boundary.
+
+/// Decode the RLE2 stream at `src` into the `size` bytes at `dst`. The
+/// stream has no end marker, so `size` is the length of the original data.
+fn rle2_uncompress(src: far *u8, dst: far *u8, size: u16) {
+    if size == 0 { return; }
+    // The even plane fills offsets 0, 2, 4 ... below size; the odd plane,
+    // from dst + 1, the offsets below size - 1.
+    let mut end: u16 = size;
+    let mut odd: bool = false;
+    loop {
+        let mut o: u16 = 0;
+        while o < end {
+            let hi: u8 = src[0];
+            let lo: u8 = src[1];
+            let n: u16 = ((((hi & 0x7F) as u16) << 8) | (lo as u16)) + 1;
+            if hi & 0x80 == 0 {
+                src += 2;
+                for k in 0..n { dst[o] = src[k]; o += 2; }
+                src += n;
+            } else {
+                let v: u8 = src[2];
+                src += 3;
+                let stop: u16 = o + (n << 1);
+                loop { dst[o] = v; o += 2; if o == stop { break; } }
+            }
+        }
+        if odd { return; }
+        odd = true;
+        dst += 1;
+        end = size - 1;
+    }
+}

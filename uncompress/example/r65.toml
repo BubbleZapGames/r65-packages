@@ -1,0 +1,11 @@
+[package]
+name    = "uncompress_example"
+version = "0.1.0"
+
+[bin]
+main = "src/main.r65"
+cfg  = ["snes"]
+
+[dependencies]
+stdlib     = { git = "https://github.com/BubbleZapGames/R65", version = "0.1" }
+uncompress = { path = ".." }

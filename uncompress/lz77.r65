@@ -1,0 +1,41 @@
+//! LZ77 decoder: the format `r65x packer pack -x lz77` writes.
+//!
+//! The stream is a run of groups of up to eight items, each group led by a
+//! control byte whose bits, lowest first, say what each item is. A 0 bit is
+//! a literal byte. A 1 bit is a 2-byte reference, low byte first: bits 0-11
+//! hold how far back in the output to copy from (1-4095) and bits 12-15 the
+//! length - 3. There is no end marker, so the decoder takes the stream's
+//! length.
+//!
+//! Neither the stream nor the output may cross a 64KB bank boundary.
+
+/// Decode the `size`-byte LZ77 stream at `src` into `dst`, returning the
+/// number of bytes written. `dst` must be RAM: references read back what is
+/// written.
+fn lz77_uncompress(src: far *u8, dst: far *u8, size: u16) -> u16 {
+    let start = dst;
+    let begin = src;
+    loop {
+        if (src - begin) as u16 >= size { return (dst - start) as u16; }
+        let control: u8 = src[0];
+        src += 1;
+        let mut bit: u8 = 1;
+        loop {
+            if (src - begin) as u16 >= size { return (dst - start) as u16; }
+            if control & bit == 0 {
+                dst[0] = src[0];
+                src += 1;
+                dst += 1;
+            } else {
+                let e: u16 = (src[0] as u16) | ((src[1] as u16) << 8);
+                src += 2;
+                let from = dst - (e & 0x0FFF);
+                let n: u16 = (e >> 12) + 3;
+                for k in 0..n { dst[k] = from[k]; }
+                dst += n;
+            }
+            bit = bit << 1;
+            if bit == 0 { break; }
+        }
+    }
+}

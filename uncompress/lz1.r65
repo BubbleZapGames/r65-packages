@@ -1,0 +1,76 @@
+//! LZ1 decoder: the format `r65x packer pack -x lz1` writes.
+//!
+//! The stream is a run of commands closed by an `$FF` byte. A command byte
+//! `cccnnnnn` holds a 3-bit command and the length - 1 in 5 bits. The long
+//! form, `111cccnn` and one more byte, holds the length - 1 in 10 bits.
+//!
+//! | Command | Writes |
+//! |---|---|
+//! | 0 | the next n bytes of the stream |
+//! | 1 | the next byte, n times |
+//! | 2 | the next two bytes, n times (2n bytes) |
+//! | 3 | the next byte, counting up by one, n bytes |
+//! | 4 | n bytes of earlier output, from the 2-byte offset that follows (high byte first) |
+//!
+//! Neither the stream nor the output may cross a 64KB bank boundary.
+
+include!("common.r65")
+
+/// Decode the LZ1 stream at `src` into `dst`, returning the number of bytes
+/// written. `dst` must be RAM: commands 1, 2 and 4 read back what is written.
+fn lz1_uncompress(src: far *u8, dst: far *u8) -> u16 {
+    let start = dst;
+    // Commands 0-2 and 4 end as a copy of `n` bytes from `from`, done at
+    // the top of the next pass. A run writes its first byte or word, then
+    // copies the output onto itself.
+    let mut from = src;
+    let mut n: u16 = 0;
+    loop {
+        for k in 0..n { dst[k] = from[k]; }
+        dst += n;
+
+        let c: u8 = src[0];
+        if c == 0xFF { return (dst - start) as u16; }
+        let mut cmd: u8 = c >> 5;
+        if cmd == 7 {
+            cmd = (c >> 2) & 7;
+            n = ((((c & 3) as u16) << 8) | (src[1] as u16)) + 1;
+            src += 2;
+        } else {
+            n = ((c & 0x1F) as u16) + 1;
+            src += 1;
+        }
+
+        match cmd {
+            0 => {
+                from = src;
+                src += n;
+            }
+            1 => {
+                dst[0] = src[0];
+                src += 1;
+                from = dst;
+                dst += 1;
+                n -= 1;
+            }
+            2 => {
+                dst[0] = src[0];
+                dst[1] = src[1];
+                src += 2;
+                from = dst;
+                dst += 2;
+                n = (n << 1) - 2;
+            }
+            3 => {
+                uncompress_count_up(dst, src[0], n);
+                src += 1;
+                dst += n;
+                n = 0;
+            }
+            _ => {
+                from = start + (((src[0] as u16) << 8) | (src[1] as u16));
+                src += 2;
+            }
+        }
+    }
+}

@@ -1,0 +1,65 @@
+//! LZ4-style decoder: the format `r65x packer pack -x lz4` writes.
+//!
+//! The stream is a run of sequences. Each opens with a token byte: the high
+//! nibble is a literal count, the low nibble a match length - 4. A nibble of
+//! 15 continues in the bytes that follow, each added to it, up to the first
+//! byte below `$FF`. The literals follow the token. Then, unless the stream
+//! ends there, come a 2-byte match offset, low byte first, and any
+//! continuation of the match length: the match copies earlier output from
+//! that offset from the start, minus one.
+//!
+//! The format differs from LZ4 proper: its offsets count from the start of
+//! the output, not back from the end. There is no end marker, so the decoder
+//! takes the stream's length.
+//!
+//! Neither the stream nor the output may cross a 64KB bank boundary.
+
+/// Decode the `size`-byte LZ4 stream at `src` into `dst`, returning the
+/// number of bytes written. `dst` must be RAM: matches read back what is
+/// written.
+fn lz4_uncompress(src: far *u8, dst: far *u8, size: u16) -> u16 {
+    let start = dst;
+    let begin = src;
+    // The literals and the match each end as a copy of `n` bytes from
+    // `from`, done at the top of the next pass.
+    let mut from = src;
+    let mut n: u16 = 0;
+    let mut token: u8 = 0;
+    let mut literals: bool = false;     // the copy pending is the literals
+    loop {
+        for k in 0..n { dst[k] = from[k]; }
+        dst += n;
+
+        if literals {
+            literals = false;
+            if (src - begin) as u16 >= size { return (dst - start) as u16; }
+            from = start + ((src[0] as u16) | ((src[1] as u16) << 8)) - 1;
+            src += 2;
+            n = (token & 0x0F) as u16;
+            if n == 15 {
+                loop {
+                    let e: u8 = src[0];
+                    src += 1;
+                    n += e as u16;
+                    if e != 0xFF { break; }
+                }
+            }
+            n += 4;
+        } else {
+            literals = true;
+            token = src[0];
+            src += 1;
+            n = (token >> 4) as u16;
+            if n == 15 {
+                loop {
+                    let e: u8 = src[0];
+                    src += 1;
+                    n += e as u16;
+                    if e != 0xFF { break; }
+                }
+            }
+            from = src;
+            src += n;
+        }
+    }
+}

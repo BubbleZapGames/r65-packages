@@ -1,0 +1,121 @@
+//! aPLib decoder: the format `r65x packer pack -x aplib` writes.
+//!
+//! aPLib is LZ77 with its commands in a bit stream. The bits come a byte at
+//! a time, highest first, from bytes placed among the data bytes as the
+//! decoder needs them. The first byte is a literal. Then:
+//!
+//! | Bits | Item |
+//! |---|---|
+//! | `0` | a literal byte |
+//! | `10` | a match: a gamma-coded offset high part, an offset low byte and a gamma-coded length; a high part of 2 just after a literal reuses the last offset |
+//! | `110` | a short match: a byte holding a 7-bit offset and 2 or 3 as its low bit; a byte of 0 ends the stream |
+//! | `111` | 4 bits: one byte from up to 15 back, or a zero |
+//!
+//! A gamma code is a 1 followed by bit pairs: a data bit, then a 1 if
+//! another pair follows.
+//!
+//! Neither the stream nor the output may cross a 64KB bank boundary.
+
+/// Read the next bit of the stream into `$b`: nonzero for a 1.
+///
+/// `mask` walks down the bit byte `bits`, highest bit first; once it falls
+/// off the bottom the next byte is loaded.
+macro_rules! aplib_bit($b:ident) {
+    if mask == 0 {
+        bits = src[0];
+        src += 1;
+        mask = 0x80;
+    }
+    $b = bits & mask;
+    mask = mask >> 1;
+}
+
+/// Read a gamma-coded number (2 or more) into `$g`.
+macro_rules! aplib_gamma($g:ident) {
+    $g = 1;
+    loop {
+        aplib_bit!(b);
+        $g = $g << 1;
+        if b != 0 { $g |= 1; }
+        aplib_bit!(b);
+        if b == 0 { break; }
+    }
+}
+
+/// Decode the aPLib stream at `src` into `dst`, returning the number of bytes
+/// written. `dst` must be RAM: matches read back what is written.
+fn aplib_uncompress(src: far *u8, dst: far *u8) -> u16 {
+    let start = dst;
+    let mut bits: u8 = 0;           // the bit byte; see aplib_bit!
+    let mut mask: u8 = 0;           // its next bit
+    let mut b: u8 = 0;
+    let mut g: u16 = 0;
+    let mut matched: bool = false;  // the last item was a match
+    let mut last: u16 = 0;          // the last match's offset
+    // A match ends as a copy of `n` bytes from `from`, done at the top of
+    // the next pass. The first byte is a literal.
+    let mut from = src;
+    let mut n: u16 = 1;
+    src += 1;
+    loop {
+        for k in 0..n { dst[k] = from[k]; }
+        dst += n;
+        n = 0;
+
+        aplib_bit!(b);
+        if b == 0 {
+            dst[0] = src[0];
+            src += 1;
+            dst += 1;
+            matched = false;
+            continue;
+        }
+        aplib_bit!(b);
+        if b == 0 {
+            aplib_gamma!(g);
+            if g == 2 && !matched {
+                aplib_gamma!(n);
+            } else {
+                // The high part counts from 3 after a literal, 2 after a match.
+                let hi: u16 = if matched { g - 2 } else { g - 3 };
+                last = (hi << 8) | (src[0] as u16);
+                src += 1;
+                aplib_gamma!(n);
+                if last >= 32000 { n += 1; }
+                if last >= 1280 { n += 1; }
+                if last < 128 { n += 2; }
+            }
+            from = dst - last;
+            matched = true;
+            continue;
+        }
+        aplib_bit!(b);
+        if b == 0 {
+            let s: u8 = src[0];
+            src += 1;
+            if s <= 1 { return (dst - start) as u16; }
+            n = 2 + ((s & 1) as u16);
+            last = (s >> 1) as u16;
+            from = dst - last;
+            matched = true;
+            continue;
+        }
+        let mut back: u16 = 0;
+        aplib_bit!(b);
+        if b != 0 { back |= 8; }
+        aplib_bit!(b);
+        if b != 0 { back |= 4; }
+        aplib_bit!(b);
+        if b != 0 { back |= 2; }
+        aplib_bit!(b);
+        if b != 0 { back |= 1; }
+        if back == 0 {
+            dst[0] = 0;
+        } else {
+            let p = dst - back;
+            dst[0] = p[0];
+        }
+        dst += 1;
+        matched = false;
+    }
+}

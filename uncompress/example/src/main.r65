@@ -1,0 +1,89 @@
+//! Decodes one sample, packed by `r65x packer` in every format, and checks
+//! each result against the original. `RESULTS[i]` is 1 when format i decoded
+//! to the original and stopped at its end, 2 when it did not; `SIZES[i]` is
+//! the size the decoder returned. `DONE` is 1 once every format has run.
+
+include!("stdlib/sneslib.r65")
+include!("stdlib/string.r65")
+include!("uncompress/aplib.r65")
+include!("uncompress/byte_rle.r65")
+include!("uncompress/rle1.r65")
+include!("uncompress/rle2.r65")
+include!("uncompress/lz1.r65")
+include!("uncompress/lz2.r65")
+include!("uncompress/lz3.r65")
+include!("uncompress/lz4.r65")
+include!("uncompress/lz5.r65")
+include!("uncompress/lz19.r65")
+include!("uncompress/lz77.r65")
+include!("uncompress/hal.r65")
+
+#[bank(1)]
+static ORIGINAL = include_bytes!("../build/sample.bin");
+static APLIB = include_bytes!("../build/sample.aplib");
+static BYTE_RLE = include_bytes!("../build/sample.byte_rle");
+static RLE1 = include_bytes!("../build/sample.rle1");
+static RLE2 = include_bytes!("../build/sample.rle2");
+static LZ1 = include_bytes!("../build/sample.lz1");
+static LZ2 = include_bytes!("../build/sample.lz2");
+#[bank(2)]
+static LZ3 = include_bytes!("../build/sample.lz3");
+static LZ4 = include_bytes!("../build/sample.lz4");
+static LZ5 = include_bytes!("../build/sample.lz5");
+static LZ19 = include_bytes!("../build/sample.lz19");
+static LZ77 = include_bytes!("../build/sample.lz77");
+static HAL = include_bytes!("../build/sample.hal");
+
+#[bank(0)]
+
+/// Bytes past the decoded data that must still hold GUARD afterwards.
+const SLACK: u16 = 16;
+const GUARD: u8 = 0xA5;
+
+#[ram]
+static mut OUT: [u8; 3600];
+#[ram] #[used]
+static mut RESULTS: [u8; 12];
+#[ram] #[used]
+static mut SIZES: [u16; 12];
+#[ram] #[used]
+static mut DONE: u8;
+
+
+/// Fill OUT with the guard byte before a decode.
+fn clear() { memset(&OUT as far *u8, GUARD, ORIGINAL.len() + SLACK); }
+
+/// Record format `i`: decoded `size` bytes, which must be the original, with
+/// nothing written past them.
+fn check(i: u16, size: u16) {
+    SIZES[i] = size;
+    let mut ok: bool = memcmp(&OUT as far *u8, &ORIGINAL as far *u8, ORIGINAL.len()) == 0;
+    let n: u16 = ORIGINAL.len();
+    for k in 0..SLACK {
+        if OUT[n + k] != GUARD { ok = false; }
+    }
+    if ok { RESULTS[i] = 1; } else { RESULTS[i] = 2; }
+}
+
+#[entry]
+fn main() -> ! {
+    snes_init();
+    DONE = 0;
+    clear(); check(0, aplib_uncompress(&APLIB as far *u8, &OUT as far *u8));
+    clear(); check(1, byte_rle_uncompress(&BYTE_RLE as far *u8, &OUT as far *u8));
+    clear(); check(2, rle1_uncompress(&RLE1 as far *u8, &OUT as far *u8));
+    clear(); rle2_uncompress(&RLE2 as far *u8, &OUT as far *u8, ORIGINAL.len()); check(3, ORIGINAL.len());
+    clear(); check(4, lz1_uncompress(&LZ1 as far *u8, &OUT as far *u8));
+    clear(); check(5, lz2_uncompress(&LZ2 as far *u8, &OUT as far *u8));
+    clear(); check(6, lz3_uncompress(&LZ3 as far *u8, &OUT as far *u8));
+    clear(); check(7, lz4_uncompress(&LZ4 as far *u8, &OUT as far *u8, LZ4.len()));
+    clear(); check(8, lz5_uncompress(&LZ5 as far *u8, &OUT as far *u8));
+    clear(); check(9, lz19_uncompress(&LZ19 as far *u8, &OUT as far *u8));
+    clear(); check(10, lz77_uncompress(&LZ77 as far *u8, &OUT as far *u8, LZ77.len()));
+    clear(); check(11, hal_uncompress(&HAL as far *u8, &OUT as far *u8));
+    DONE = 1;
+    loop { wait_nmi!(); }
+}
+
+#[interrupt(nmi)]
+fn nmi_handler() { }

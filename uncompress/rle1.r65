@@ -1,0 +1,42 @@
+//! RLE1 decoder: the format `r65x packer pack -x rle1` writes.
+//!
+//! The stream is a run of commands closed by `$FF $FF`. Each command opens
+//! with a 2-byte header, high byte first: bit 15 picks the command and bits
+//! 0-14 hold the length - 1.
+//!
+//! | Bit 15 | Writes |
+//! |---|---|
+//! | 0 | the next n bytes of the stream |
+//! | 1 | the next byte, n times |
+//!
+//! Neither the stream nor the output may cross a 64KB bank boundary.
+
+/// Decode the RLE1 stream at `src` into `dst`, returning the number of bytes
+/// written. `dst` must be RAM: a run reads back what it writes.
+fn rle1_uncompress(src: far *u8, dst: far *u8) -> u16 {
+    let start = dst;
+    // Both commands end as a copy of `n` bytes from `from`, done at the top
+    // of the next pass. A run writes its first byte, then copies the output
+    // onto itself.
+    let mut from = src;
+    let mut n: u16 = 0;
+    loop {
+        for k in 0..n { dst[k] = from[k]; }
+        dst += n;
+
+        let hi: u8 = src[0];
+        let lo: u8 = src[1];
+        if hi == 0xFF && lo == 0xFF { return (dst - start) as u16; }
+        n = ((((hi & 0x7F) as u16) << 8) | (lo as u16)) + 1;
+        if hi & 0x80 == 0 {
+            from = src + 2;
+            src += n + 2;
+        } else {
+            dst[0] = src[2];
+            src += 3;
+            from = dst;
+            dst += 1;
+            n -= 1;
+        }
+    }
+}
