@@ -2,9 +2,9 @@
 command of every format - text, long and short runs, word runs, rising
 bytes, tile-like data, mirrored and bit-reversed copies, noise.
 
-It never holds the byte $FE, so byte_rle has a free tag, and no run is
-longer than 256 bytes, the longest byte_rle can write. The length is odd,
-so rle2's planes differ in size.
+It never holds the byte $FE, so byte_rle has a free tag. A run of 600
+zeros makes byte_rle chain counts. The length is odd, so rle2's planes
+differ in size.
 
     python make_sample.py out.bin
 """
@@ -21,7 +21,7 @@ def sample():
     no_fe = [v for v in range(256) if v != 0xFE]
     out = bytearray()
     out += (b"The quick brown fox jumps over the lazy dog. " * 12)[:500]
-    out += bytes(250)
+    out += bytes(600)
     out += bytes(0xFF for _ in range(40))
     out += bytes([0x12, 0x34]) * 60
     out += bytes(i for i in range(200))

@@ -43,21 +43,21 @@ kept, and the data is truncated or padded to fit.
 
 | File | Function | Sample size | Cycles per byte |
 |---|---|---|---|
-| `aplib.r65` | `aplib_uncompress(src, dst) -> u16` | 1575 | 108 |
-| `byte_rle.r65` | `byte_rle_uncompress(src, dst) -> u16` | 3262 | 67 |
-| `rle1.r65` | `rle1_uncompress(src, dst) -> u16` | 3558 | 41 |
-| `rle2.r65` | `rle2_uncompress(src, dst, size)` | 3368 | 79 |
-| `lz1.r65` | `lz1_uncompress(src, dst) -> u16` | 1308 | 44 |
-| `lz2.r65` | `lz2_uncompress(src, dst) -> u16` | 1308 | 44 |
-| `lz3.r65` | `lz3_uncompress(src, dst) -> u16` | 1328 | 50 |
-| `lz4.r65` | `lz4_uncompress(src, dst, size) -> u16` | 1603 | 45 |
-| `lz5.r65` | `lz5_uncompress(src, dst) -> u16` | 1151 | 44 |
-| `lz19.r65` | `lz19_uncompress(src, dst) -> u16` | 1150 | 51 |
-| `lz77.r65` | `lz77_uncompress(src, dst, size) -> u16` | 1761 | 87 |
-| `hal.r65` | `hal_uncompress(src, dst) -> u16` | 1597 | 42 |
+| `aplib.r65` | `aplib_uncompress(src, dst) -> u16` | 1582 | 102 |
+| `byte_rle.r65` | `byte_rle_uncompress(src, dst) -> u16` | 3266 | 64 |
+| `rle1.r65` | `rle1_uncompress(src, dst) -> u16` | 3558 | 40 |
+| `rle2.r65` | `rle2_uncompress(src, dst, size)` | 3368 | 76 |
+| `lz1.r65` | `lz1_uncompress(src, dst) -> u16` | 1308 | 42 |
+| `lz2.r65` | `lz2_uncompress(src, dst) -> u16` | 1308 | 42 |
+| `lz3.r65` | `lz3_uncompress(src, dst) -> u16` | 1328 | 48 |
+| `lz4.r65` | `lz4_uncompress(src, dst, size) -> u16` | 1605 | 44 |
+| `lz5.r65` | `lz5_uncompress(src, dst) -> u16` | 1151 | 42 |
+| `lz19.r65` | `lz19_uncompress(src, dst) -> u16` | 1150 | 49 |
+| `lz77.r65` | `lz77_uncompress(src, dst, size) -> u16` | 1804 | 83 |
+| `hal.r65` | `hal_uncompress(src, dst) -> u16` | 1597 | 41 |
 
 `src` and `dst` are `far *u8`. Each function returns the number of bytes it
-wrote. The sizes and speeds are from the example's 3575-byte sample (text,
+wrote. The sizes and speeds are from the example's 3925-byte sample (text,
 runs, tilemap-like rows, mirrored and inverted copies, noise): the size is
 the packed size in bytes, and the speed is CPU cycles per output byte, measured in Mesen, at
 `-O1` with the Default ABI. Every file opens with a description of its format.
@@ -71,8 +71,8 @@ the packed size in bytes, and the speed is CPU cycles per output byte, measured 
 - **lz4**, **lz77** and **rle2** have no end marker. lz4 and lz77 take the
   packed `size` (`ARRAY.len()` of the `include_bytes!` static). rle2 takes
   the unpacked size.
-- **byte_rle** needs a byte value the data never holds, and runs of at most
-  256 bytes: the packer fails on other data.
+- **byte_rle** needs a byte value the data never holds: the packer refuses
+  data that holds all 256.
 
 ## Rules
 

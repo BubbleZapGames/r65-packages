@@ -41,7 +41,7 @@ const SLACK: u16 = 16;
 const GUARD: u8 = 0xA5;
 
 #[ram]
-static mut OUT: [u8; 3600];
+static mut OUT: [u8; 3950];
 #[ram] #[used]
 static mut RESULTS: [u8; 12];
 #[ram] #[used]
