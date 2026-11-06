@@ -13,7 +13,7 @@ from states import game, title
 # scene's hooks first (update, nmi, load, unload).
 CURRENT, PHASE, LAG = 0, 42, 44
 UNLOAD = CURRENT + 9    # current.unload: transitions never replace it
-ACTIVE = 0          # ScenePhase::Active (Pending is 1)
+ACTIVE = 0          # ScenePhase::Active
 ROWS = range(16, 64)  # picture rows (the screenshot has a blank border above)
 
 

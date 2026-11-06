@@ -154,8 +154,8 @@ current scene off screen and the In brings the next one on.
 Either can be `SceneNone`, for no transition: the controller skips it, so it
 moves straight on and the screen stays as it is. The game's first request has
 no scene to take off screen, so its Out is always `SceneNone`. `goto!(Next)`
-is `transition!(Next, SceneNone, SceneNone)`: the scene changes at the frame
-boundary, and a scene that comes in that way turns the screen on itself, in
+does what `transition!(Next, SceneNone, SceneNone)` does, without storing
+any transition: the scene changes at the frame boundary, and a scene that comes in that way turns the screen on itself, in
 `load`:
 
 ```rust
@@ -413,9 +413,11 @@ pointer to `self`. A hook then reads its state with absolute addressing.
 `nmi!` is a macro, so its body is always inlined into the NMI handler: the
 only call in vblank is the `nmi` hook itself.
 
-A request is one call to `SceneController::request`, with the hooks of the
-three types it names as arguments: 10 function addresses, 30 bytes pushed as
-constants, about 65 bytes of ROM at each request site. The controller keeps
+A request expands, through the `SceneController::request!` macro, to a check
+that the controller is Active and then stores of the hooks of the types it
+names, written as immediates with no call: for `transition!` 10 function
+addresses, about 170 bytes of ROM at each request site; for `goto!` only the
+scene's 4, about 80. The controller keeps
 the current scene's four hooks itself, and `SceneController::install()`
 copies the incoming scene's over them.
 

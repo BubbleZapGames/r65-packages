@@ -98,9 +98,10 @@ trait SceneTransition: SceneHooks {
 }
 
 /// What the controller does with the current scene each frame: run it
-/// (Active), start an accepted request at the next frame boundary (Pending),
-/// or run one of the request's transitions (Out, In).
-enum ScenePhase { Active, Pending, Out, In }
+/// (Active), start an accepted request at the next frame boundary (Goto with
+/// no transitions, Pending with them), or run one of the request's
+/// transitions (Out, In).
+enum ScenePhase { Active, Goto, Pending, Out, In }
 
 /// A scene's hooks, as the controller keeps them.
 struct SceneHookSet {
@@ -239,10 +240,8 @@ impl SceneController {
     /// on if it needs to. A type, not a value: `goto!(Title)`. False if the
     /// controller is not Active or a request is pending.
     macro_rules! goto($next:ident) {
-        SceneController::request(
-            $next::update, $next::nmi, $next::load, $next::unload,
-            SceneNone::update, SceneNone::nmi, SceneNone::done,
-            SceneNone::update, SceneNone::nmi, SceneNone::done)
+        SceneController::request!(
+            $next::update, $next::nmi, $next::load, $next::unload)
     }
 
     /// Changes to the scene `$next` through two transitions: `$out` takes the
@@ -252,7 +251,7 @@ impl SceneController {
     /// game's first request, before `run`, is a `transition!` with no Out, or
     /// a `goto!`.
     macro_rules! transition($next:ident, $out:ident, $in:ident) {
-        SceneController::request(
+        SceneController::request!(
             $next::update, $next::nmi, $next::load, $next::unload,
             $out::update, $out::nmi, $out::done,
             $in::update, $in::nmi, $in::done)
@@ -280,25 +279,49 @@ impl SceneController {
     macro_rules! frame() { SCENE_CONTROLLER.frame.lo }
 
     /// Records a request, if one is accepted now: the controller is Active
-    /// (so nothing is pending either). It takes the hooks of the scene and
-    /// the two transitions the request names (`goto!` and `transition!` pass
-    /// them). `phase` is written last: it is what `step` looks at.
-    fn request(update: fn(), nmi: fn(), load: fn(), unload: fn(),
-               out_update: fn(), out_nmi: fn(), out_done: fn() -> bool,
-               in_update: fn(), in_nmi: fn(), in_done: fn() -> bool) -> bool {
-        if SCENE_CONTROLLER.phase != ScenePhase::Active { return false; }
-        SCENE_CONTROLLER.next.update = update;
-        SCENE_CONTROLLER.next.nmi = nmi;
-        SCENE_CONTROLLER.next.load = load;
-        SCENE_CONTROLLER.next.unload = unload;
-        SCENE_CONTROLLER.trans_out.update = out_update;
-        SCENE_CONTROLLER.trans_out.nmi = out_nmi;
-        SCENE_CONTROLLER.trans_out.done = out_done;
-        SCENE_CONTROLLER.trans_in.update = in_update;
-        SCENE_CONTROLLER.trans_in.nmi = in_nmi;
-        SCENE_CONTROLLER.trans_in.done = in_done;
-        SCENE_CONTROLLER.phase = ScenePhase::Pending;
-        return true;
+    /// (so nothing is pending either). `goto!` passes the hooks of the scene
+    /// it names; `transition!` those and its two transitions'. It is `true`
+    /// when the request is accepted, and sets the phase the request starts
+    /// in: `Goto`, or `Pending` with transitions. A macro, so each request
+    /// writes its hooks in place, as immediates, and a `goto!` writes no
+    /// transition hooks at all.
+    macro_rules! request {
+        ($update:expr, $nmi:expr, $load:expr, $unload:expr) => {
+            {
+                let scene_request_accepted: bool =
+                    SCENE_CONTROLLER.phase == ScenePhase::Active;
+                if scene_request_accepted {
+                    SCENE_CONTROLLER.next.update = $update;
+                    SCENE_CONTROLLER.next.nmi = $nmi;
+                    SCENE_CONTROLLER.next.load = $load;
+                    SCENE_CONTROLLER.next.unload = $unload;
+                    SCENE_CONTROLLER.phase = ScenePhase::Goto;
+                }
+                scene_request_accepted
+            }
+        };
+        ($update:expr, $nmi:expr, $load:expr, $unload:expr,
+         $out_update:expr, $out_nmi:expr, $out_done:expr,
+         $in_update:expr, $in_nmi:expr, $in_done:expr) => {
+            {
+                let scene_request_accepted: bool =
+                    SCENE_CONTROLLER.phase == ScenePhase::Active;
+                if scene_request_accepted {
+                    SCENE_CONTROLLER.next.update = $update;
+                    SCENE_CONTROLLER.next.nmi = $nmi;
+                    SCENE_CONTROLLER.next.load = $load;
+                    SCENE_CONTROLLER.next.unload = $unload;
+                    SCENE_CONTROLLER.trans_out.update = $out_update;
+                    SCENE_CONTROLLER.trans_out.nmi = $out_nmi;
+                    SCENE_CONTROLLER.trans_out.done = $out_done;
+                    SCENE_CONTROLLER.trans_in.update = $in_update;
+                    SCENE_CONTROLLER.trans_in.nmi = $in_nmi;
+                    SCENE_CONTROLLER.trans_in.done = $in_done;
+                    SCENE_CONTROLLER.phase = ScenePhase::Pending;
+                }
+                scene_request_accepted
+            }
+        };
     }
 
     /// The main-loop half of a frame: move the lifecycle on if a request is
@@ -312,26 +335,35 @@ impl SceneController {
     }
 
     /// Moves a request on: start it at the frame boundary after it was made
-    /// (Pending), or end its running transition once `done` says so.
+    /// (Goto changes the scene at once; Pending starts its Out), or end its
+    /// running transition once `done` says so.
     fn advance() {
-        if SCENE_CONTROLLER.phase == ScenePhase::Pending {
-            if SCENE_CONTROLLER.trans_out.done == SceneNone::done {
-                SceneController::switch();
-            } else {
-                SceneController::begin_out();
-            }
-        } else if SCENE_CONTROLLER.phase == ScenePhase::Out {
-            SCENE_CONTROLLER.frame += SCENE_ONE_FRAME;
-            let done: fn() -> bool = SCENE_CONTROLLER.trans_out.done;
-            if done() {
+        match SCENE_CONTROLLER.phase {
+            ScenePhase::Goto => {
                 SceneController::switch();
             }
-        } else {
-            SCENE_CONTROLLER.frame += SCENE_ONE_FRAME;
-            let done: fn() -> bool = SCENE_CONTROLLER.trans_in.done;
-            if done() {
-                SceneController::activate();
+            ScenePhase::Pending => {
+                if SCENE_CONTROLLER.trans_out.done == SceneNone::done {
+                    SceneController::switch();
+                } else {
+                    SceneController::begin_out();
+                }
             }
+            ScenePhase::Out => {
+                SCENE_CONTROLLER.frame += SCENE_ONE_FRAME;
+                let done: fn() -> bool = SCENE_CONTROLLER.trans_out.done;
+                if done() {
+                    SceneController::switch();
+                }
+            }
+            ScenePhase::In => {
+                SCENE_CONTROLLER.frame += SCENE_ONE_FRAME;
+                let done: fn() -> bool = SCENE_CONTROLLER.trans_in.done;
+                if done() {
+                    SceneController::activate();
+                }
+            }
+            ScenePhase::Active => { }       // step() calls this only off Active
         }
     }
 
@@ -353,16 +385,18 @@ impl SceneController {
         SCENE_CONTROLLER.current.nmi = SCENE_CONTROLLER.trans_in.nmi;
     }
 
-    /// The end of Transition Out: the current scene's `unload`, the new
-    /// scene installed and its `load`, then Transition In begins, or with
-    /// none, the new scene is Active at once.
+    /// The scene change, at the end of Transition Out or straight from a
+    /// `goto!`: the current scene's `unload`, the new scene installed and its
+    /// `load`, then Transition In begins, or for a `goto!` or with no In, the
+    /// new scene is Active at once.
     fn switch() {
         let unload: fn() = SCENE_CONTROLLER.current.unload;
         unload();
         SceneController::install();
         let load: fn() = SCENE_CONTROLLER.current.load;
         load();
-        if SCENE_CONTROLLER.trans_in.done == SceneNone::done {
+        if SCENE_CONTROLLER.phase == ScenePhase::Goto
+                || SCENE_CONTROLLER.trans_in.done == SceneNone::done {
             SceneController::activate();
         } else {
             SceneController::begin_in();
