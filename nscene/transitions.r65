@@ -1,0 +1,249 @@
+//! Ready-made transitions for `SceneController`: fades, mosaics, sepia and
+//! cuts.
+//!
+//! A transition is a type that implements `SceneTransition`. Its clock is the
+//! controller's `frame!()`, so it keeps no counter. The fades and mosaics
+//! here are made by macros, one type per length, which a request names:
+//!
+//! ```
+//! scene_fade_out!(FadeOut90, 90);
+//! scene_fade_in!(FadeIn, 30);
+//!
+//! SceneController::transition!(Over, FadeOut90, FadeIn);
+//! ```
+//!
+//! A type has no RAM and no data: the length is a constant in its code. Each
+//! one is its own `nmi` and `done`, about 60 bytes of ROM for a fade and 80
+//! for a mosaic. A type nothing uses is dropped.
+//!
+//! The length is any `u8` expression, read every frame. For one chosen at
+//! run time (a speed option, timing from data), name a static:
+//!
+//! ```
+//! static mut SPEED: u8;
+//! scene_fade_in!(FadeInBy, SPEED);
+//!
+//! SPEED = 45;
+//! SceneController::transition!(Title, FadeOut, FadeInBy);
+//! ```
+//!
+//! A length is 1 to 255 frames: the level is `frames * 15 / length`, one
+//! hardware divide per frame. `scene_frames_transition!` makes a type of the
+//! same shape from a step macro of the game's own.
+//!
+//! The fades and mosaics do all their work in `nmi`, in vblank, where they
+//! write INIDISP and MOSAIC directly.
+//!
+//! `scene_sepia_out!` turns the picture to sepia tones and leaves it lit: the
+//! Out transition to a game-over scene drawn over the picture. It needs a
+//! `ScenePalette`, 1 KB the game declares. It steps the colours in `update`
+//! and only uploads them in `nmi`.
+//!
+//! The other Out transitions here end in force blank, so the next `load` may
+//! DMA freely. They undo only what they set themselves (MOSAIC): the PPU state a
+//! scene sets up, such as HDMA, colour math or windows, is the scene's to undo
+//! in `unload`.
+
+include!("stdlib/sneslib.r65")
+include!("stdlib/math.r65")
+include!("nscene/nscene.r65")
+
+/// One frame of a fade `$length` frames long, frame `$t` of it, for a
+/// transition's `nmi`: up from black, or with `$out`, down to black and then
+/// force blank. From frame `$length` on it writes the end state, so the
+/// transition is done once `$t > $length`. Given literals, the length and
+/// direction compile to constants and the untaken direction to nothing.
+macro_rules! scene_fade_nmi($t:expr, $length:expr, $out:expr) {
+    if $t >= $length as u16 {
+        if $out {
+            INIDISP = FORCE_BLANK;
+        } else {
+            INIDISP = 15;
+        }
+    } else {
+        let level: u8 = div16(($t << 4) - $t, $length) as u8;
+        if $out {
+            INIDISP = 15 - level;
+        } else {
+            INIDISP = level;
+        }
+    }
+}
+
+/// One frame of a mosaic transition `$length` frames long, frame `$t` of it,
+/// for a transition's `nmi`: the mosaic on every BG shrinks from 16 pixels
+/// to 1 while the screen fades up, or with `$out`, grows from 1 to 16 while
+/// it fades down, then force blank. From frame `$length` on it writes the end
+/// state, with the mosaic off, so the transition is done once `$t > $length`.
+macro_rules! scene_mosaic_nmi($t:expr, $length:expr, $out:expr) {
+    if $t >= $length as u16 {
+        MOSAIC = 0;
+        if $out {
+            INIDISP = FORCE_BLANK;
+        } else {
+            INIDISP = 15;
+        }
+    } else {
+        let s: u8 = div16(($t << 4) - $t, $length) as u8;
+        if $out {
+            MOSAIC = (s << 4) | 0x0F;
+            INIDISP = 15 - s;
+        } else {
+            MOSAIC = ((15 - s) << 4) | 0x0F;
+            INIDISP = s;
+        }
+    }
+}
+
+/// Defines the transition type `$name`, `$length` frames long (1 to 255):
+/// one frame of it is `$step!(frame, $length, $out)`, run from `nmi`, with
+/// `frame` the controller's `frame!()`. It is done once the frame passes the
+/// length, so `$step` writes the end state from frame `$length` on, as
+/// `scene_fade_nmi!` and `scene_mosaic_nmi!` do.
+///
+/// ```
+/// macro_rules! wipe_nmi($t:expr, $length:expr, $out:expr) { /* ... */ }
+/// scene_frames_transition!(Wipe, wipe_nmi, true, 20);
+/// ```
+macro_rules! scene_frames_transition($name:ident, $step:ident, $out:expr, $length:expr) {
+    struct $name;
+
+    impl SceneHooks for $name {
+        fn update() { }
+
+        fn nmi() { $step!(SceneController::frame!(), $length, $out); }
+    }
+
+    impl SceneTransition for $name {
+        fn done() -> bool { return SceneController::frame!() > $length as u16; }
+    }
+}
+
+/// `$name`: a fade up from black over `$length` frames.
+macro_rules! scene_fade_in($name:ident, $length:expr) {
+    scene_frames_transition!($name, scene_fade_nmi, false, $length);
+}
+
+/// `$name`: a fade down to black over `$length` frames, then force blank.
+macro_rules! scene_fade_out($name:ident, $length:expr) {
+    scene_frames_transition!($name, scene_fade_nmi, true, $length);
+}
+
+/// `$name`: over `$length` frames, the mosaic on every BG shrinks from 16
+/// pixels to 1 while the screen fades up.
+macro_rules! scene_mosaic_in($name:ident, $length:expr) {
+    scene_frames_transition!($name, scene_mosaic_nmi, false, $length);
+}
+
+/// `$name`: over `$length` frames, the mosaic on every BG grows from 1 pixel
+/// to 16 while the screen fades down, then force blank.
+macro_rules! scene_mosaic_out($name:ident, $length:expr) {
+    scene_frames_transition!($name, scene_mosaic_nmi, true, $length);
+}
+
+/// Either transition, in one frame, with the screen left lit: for a scene
+/// that comes in over the picture the last one left.
+struct SceneCut;
+
+impl SceneHooks for SceneCut {
+    fn update() { }
+
+    fn nmi() { INIDISP = 15; }
+}
+
+impl SceneTransition for SceneCut {
+    fn done() -> bool { return true; }
+}
+
+/// Transition Out, in one frame: force blank.
+struct SceneCutBlank;
+
+impl SceneHooks for SceneCutBlank {
+    fn update() { }
+
+    fn nmi() { INIDISP = FORCE_BLANK; }
+}
+
+impl SceneTransition for SceneCutBlank {
+    fn done() -> bool { return true; }
+}
+
+/// The work area of `scene_sepia_out!`: the palette as it is on screen, and
+/// the sepia tone each colour is heading for. The game declares one, `#[ram]`.
+struct ScenePalette {
+    cur: [u16; 256],
+    target: [u16; 256],
+}
+
+/// Defines the transition type `$name`, a fade of every colour to sepia over
+/// 32 frames, with `$pal`, a `ScenePalette` static, as its work area. The
+/// screen stays lit: the Out of a goto to a game-over scene that loads
+/// nothing, so the picture stays beneath it, sepia. It reads CGRAM, so any palette is turned.
+///
+/// A sepia tone comes from the green channel alone, at five eighths of its
+/// level (at least 4), with blue at half that. Each frame every channel
+/// steps one level toward its tone, so 31 steps reach any of them. The first
+/// `nmi` reads CGRAM; from then on `update` works out the tones (once) and
+/// steps the palette in the main loop, and `nmi` uploads it with DMA
+/// channel 0.
+macro_rules! scene_sepia_out($name:ident, $pal:ident) {
+    struct $name;
+
+    impl SceneHooks for $name {
+        fn update() {
+            if SceneController::frame!() == 0 {
+                return;                         // CGRAM is not read yet
+            }
+            if SceneController::frame!() == 1 {
+                for i in 0..256 {
+                    let mut g: u16 = ($pal.cur[i] >> 5) & 0x1F;
+                    if g < 4 {
+                        g = 4;
+                    }
+                    g = ((g << 2) + g) >> 3;
+                    $pal.target[i] = ((g >> 1) << 10) | (g << 5) | g;
+                }
+            }
+            for i in 0..256 {
+                let c: u16 = $pal.cur[i];
+                let t: u16 = $pal.target[i];
+                if c != t {
+                    let mut n: u16 = c;
+                    if (c & 0x001F) < (t & 0x001F) {
+                        n = n + 0x0001;
+                    } else if (c & 0x001F) != (t & 0x001F) {
+                        n = n - 0x0001;
+                    }
+                    if (c & 0x03E0) < (t & 0x03E0) {
+                        n = n + 0x0020;
+                    } else if (c & 0x03E0) != (t & 0x03E0) {
+                        n = n - 0x0020;
+                    }
+                    if (c & 0x7C00) < (t & 0x7C00) {
+                        n = n + 0x0400;
+                    } else if (c & 0x7C00) != (t & 0x7C00) {
+                        n = n - 0x0400;
+                    }
+                    $pal.cur[i] = n;
+                }
+            }
+        }
+
+        fn nmi() {
+            if SceneController::frame!() == 0 {
+                // CGRAM into `cur`: reading $213B twice per colour, low then high.
+                CGADD = 0;
+                dma_set_src!(0, $pal);
+                dma_set_size!(0, 512);
+                dma_set_ppu_dest!(0, 128, 59);  // CGRAM to the CPU side, from $213B
+                dma_trigger!(0);
+            } else {
+                dma_copy_cgram_const!(0, $pal, 0, 256);
+            }
+        }
+    }
+
+    impl SceneTransition for $name {
+        fn done() -> bool { return SceneController::frame!() >= 32; }
+    }
+}

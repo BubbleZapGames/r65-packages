@@ -1,0 +1,281 @@
+//! nscene example: four scenes that exercise every event.
+//!
+//! Title --Start--> Game --Select--> Over --Start--> Title
+//!                       --Y--> Fallen --Start--> Title
+//!
+//! Game draws a checkerboard on BG1 and cycles the backdrop from its `nmi`.
+//! It comes and goes with mosaics; Fallen turns it sepia and leaves it lit.
+//! Holding B in Game makes `update` overrun the frame, to show lag frames. During a
+//! transition only the transition's hooks run, so the backdrop holds still.
+
+#[snesrom(name="NSCENE EXAMPLE")]
+
+#[stack(0x0100, 0x01FF)]
+
+include!("stdlib/65816.r65")
+include!("stdlib/sneslib.r65")
+include!("nscene/nscene.r65")
+include!("nscene/transitions.r65")
+
+#[bank(0)]
+
+// JOY1H bits.
+const PAD_B: u8 = 0x80;
+const PAD_Y: u8 = 0x40;
+const PAD_SELECT: u8 = 0x20;
+const PAD_START: u8 = 0x10;
+
+// nscene owns the controller and the cuts. The other transitions are the
+// game's: each macro line is a type of a ready-made kind, its length built
+// in. The controller's frame counter is their clock.
+
+scene_fade_in!(FadeIn, 30);
+scene_fade_out!(FadeOut, 30);
+scene_mosaic_in!(MosaicIn, 30);
+scene_mosaic_out!(MosaicOut, 30);
+
+#[lowram]
+static mut PAD_HELD: u8;
+#[lowram]
+static mut PAD_PREV: u8;
+
+/// Calls of `Game::nmi`, for the tests.
+#[lowram]
+static mut GAME_NMI_CALLS: u16;
+
+/// Whether Title's second request in a frame was refused, for the tests:
+/// the first request wins.
+#[lowram]
+static mut SECOND_REQUEST_REFUSED: u8;
+
+/// NMIs seen, for the tests.
+#[lowram]
+static mut NMI_CALLS: u16;
+
+/// The most scanlines an NMI has taken, for the tests: the transitions run in
+/// it, and one must end before the next NMI.
+#[lowram]
+static mut NMI_LINES_MAX: u16;
+
+/// Reads the pad and returns the buttons newly pressed (JOY1H bits). The
+/// current scene calls it once per frame from `update`. `update` starts early in
+/// vblank, while the auto-joypad read may still be shifting, so wait for it.
+fn pad_pressed() -> u8 {
+    wait_autojoy!();
+    PAD_HELD = JOY1H;
+    let fresh: u8 = PAD_HELD & ~PAD_PREV;
+    PAD_PREV = PAD_HELD;
+    return fresh;
+}
+
+// ----------------------------------------------------------------------------
+// Title: default fades, a navy backdrop. No state, so no static.
+// ----------------------------------------------------------------------------
+
+struct Title;
+
+impl SceneHooks for Title {
+    fn update() {
+        if pad_pressed() & PAD_START != 0 {
+            SceneController::transition!(Game, FadeOut, MosaicIn);
+            // A second request in the same frame is refused: the first wins.
+            SECOND_REQUEST_REFUSED = 0;
+            if !SceneController::goto!(Over) {
+                SECOND_REQUEST_REFUSED = 1;
+            }
+        }
+    }
+
+    fn nmi() { }
+}
+
+impl Scene for Title {
+    fn load() {
+        set_main_layers!(0);
+        set_backdrop!(0x3000);
+    }
+
+    fn unload() { }
+}
+
+// ----------------------------------------------------------------------------
+// Game: a checkerboard, a cycling backdrop, mosaic transitions. Its state is
+// a static of its own type, which its hooks read by name.
+// ----------------------------------------------------------------------------
+
+struct Game { ticks: u16, hue: u8 }
+
+static mut GAME: Game;
+
+impl SceneHooks for Game {
+    fn update() {
+        let fresh: u8 = pad_pressed();
+        if fresh & PAD_SELECT != 0 {
+            SceneController::transition!(Over, MosaicOut, SlowFadeIn);
+            return;
+        }
+        if fresh & PAD_Y != 0 {
+            // No In: Fallen loads nothing and the screen is already lit.
+            SceneController::transition!(Fallen, SepiaOut, SceneNone);
+            return;
+        }
+        GAME.ticks++;
+        if GAME.ticks & 3 == 0 {
+            GAME.hue = (GAME.hue + 1) & 0x1F;
+        }
+        if PAD_HELD & PAD_B != 0 {
+            burn();
+        }
+    }
+
+    fn nmi() {
+        GAME_NMI_CALLS++;
+        let color: u16 = (GAME.hue as u16) | 0x0100;
+        set_backdrop!(color);
+    }
+}
+
+impl Scene for Game {
+    fn load() {
+        GAME.ticks = 0;
+        GAME.hue = 0;
+        checker_load();
+    }
+
+    fn unload() { }
+}
+
+/// BG1 in mode 0: tile 1 is a 4-pixel checker, and the map is all tile 1.
+fn checker_load() {
+    set_bgmode!(0, 0);
+    set_bg1_map!(0x1C, 0);
+    set_bg12_chr!(0, 0);
+    VMAIN = 0x80;
+    set_vram_addr!(0x0008);
+    let mut row: u8 = 0;
+    while row < 8 {
+        if row < 4 {
+            write_vram!(0x00F0);
+        } else {
+            write_vram!(0x000F);
+        }
+        row++;
+    }
+    set_vram_addr!(0x7000);
+    let mut i: u16 = 0;
+    while i < 1024 {
+        write_vram!(0x0001);
+        i++;
+    }
+    set_cgram_addr!(1);
+    write_color!(0x7FFF);
+    set_main_layers!(Screen::BG1);
+}
+
+/// Spins for several frames: an `update` that overruns its frame.
+fn burn() {
+    let mut i: u16 = 0;
+    while i < 20000 {
+        asm!("NOP");
+        i++;
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Over: comes in with a slow fade, a dark red backdrop.
+// ----------------------------------------------------------------------------
+
+// Over comes in at half the usual speed: another type of the same kind.
+scene_fade_in!(SlowFadeIn, 60);
+
+/// How long Over's fade out lasts, chosen at run time: the fade reads it
+/// every frame, so it is set just before the request.
+#[lowram]
+static mut LEAVE_FRAMES: u8;
+
+scene_fade_out!(LeaveFade, LEAVE_FRAMES);
+
+/// How long Over's fade out lasts.
+const LEAVE_LENGTH: u8 = 90;
+
+struct Over;
+
+impl SceneHooks for Over {
+    fn update() {
+        if pad_pressed() & PAD_START != 0 {
+            LEAVE_FRAMES = LEAVE_LENGTH;
+            SceneController::transition!(Title, LeaveFade, FadeIn);
+        }
+    }
+
+    fn nmi() { }
+}
+
+impl Scene for Over {
+    fn load() {
+        set_main_layers!(0);
+        set_backdrop!(0x0010);
+    }
+
+    fn unload() { }
+}
+
+// ----------------------------------------------------------------------------
+// Fallen: a game-over page over Game's picture, which turns sepia and stays
+// lit: Fallen loads nothing, so the picture Game left is what it shows.
+// ----------------------------------------------------------------------------
+
+/// The work area of `SepiaOut`.
+#[ram]
+static mut SEPIA: ScenePalette;
+
+scene_sepia_out!(SepiaOut, SEPIA);
+
+struct Fallen;
+
+impl SceneHooks for Fallen {
+    fn update() {
+        if pad_pressed() & PAD_START != 0 {
+            SceneController::transition!(Title, FadeOut, FadeIn);
+        }
+    }
+
+    fn nmi() { }
+}
+
+impl Scene for Fallen {
+    fn load() { }                       // the screen stays lit: nothing to load
+
+    fn unload() { }
+}
+
+// ----------------------------------------------------------------------------
+
+#[entry]
+fn reset() -> ! {
+    NMI_LINES_MAX = 0;
+    NMI_CALLS = 0;
+    snes_init();
+    SceneController::transition!(Title, SceneNone, FadeIn);
+    SceneController::run();
+}
+
+#[interrupt(nmi)]
+fn vblank() {
+    NMI_CALLS++;
+    SceneController::nmi!();
+    // The scanline it ended on, counted from 225, where vblank (and the NMI)
+    // begins. Reading STAT78 resets OPVCT's low/high flip-flop.
+    A = STAT78;
+    A = SLHV;
+    let lo: u8 = OPVCT;
+    let hi: u8 = OPVCT & 0x01;
+    let line: u16 = ((hi as u16) << 8) | (lo as u16);
+    let mut took: u16 = line + 262 - 225;
+    if line >= 225 {
+        took = line - 225;
+    }
+    if took > NMI_LINES_MAX {
+        NMI_LINES_MAX = took;
+    }
+}

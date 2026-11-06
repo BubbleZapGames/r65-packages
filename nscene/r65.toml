@@ -1,0 +1,11 @@
+[package]
+name        = "nscene"
+version     = "0.1.0"
+r65-version = "0.3"
+cfg         = ["snes"]
+
+[lib]
+include_dir = "."
+
+[dependencies]
+stdlib = { git = "https://github.com/BubbleZapGames/R65", version = "0.1" }

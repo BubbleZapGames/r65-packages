@@ -1,0 +1,387 @@
+//! Scenes for the SNES: screens with Load, NMI, Main loop, Transition In and
+//! Transition Out events, navigated by `goto`.
+//!
+//! Scenes and transitions share one base trait, `SceneHooks`, with the two
+//! hooks that run every frame: `update` and `nmi`. A scene is a type that
+//! implements it and `Scene`: an empty struct, or the struct its state lives
+//! in, with that state in a static of the game's. Its hooks take no `self`;
+//! they reach the state through the static by name, so a field read is one
+//! absolute load. A transition is a type that implements `SceneHooks` and
+//! `SceneTransition` the same way. Each frame the controller calls the
+//! running hooks through a function pointer: the current scene's while it is
+//! Active, the transition's while one runs. It never touches the PPU.
+//! Transitions do: ready-made ones are in `nscene/transitions.r65`.
+//!
+//! Requests name the types: `SceneController::transition!(Game, FadeOut,
+//! FadeIn)`, or with no transitions, `SceneController::goto!(Game)`.
+//!
+//! ```
+//! include!("nscene/nscene.r65")
+//! include!("nscene/transitions.r65")
+//!
+//! scene_fade_in!(FadeIn, 30);
+//! scene_fade_out!(FadeOut, 30);
+//!
+//! struct Title { blink: u8 }
+//! static mut TITLE: Title;
+//!
+//! impl SceneHooks for Title {
+//!     fn update() {
+//!         TITLE.blink++;
+//!         if start_pressed() { SceneController::transition!(Game, FadeOut, FadeIn); }
+//!     }
+//!     fn nmi() { }
+//! }
+//!
+//! impl Scene for Title {
+//!     fn load() { TITLE.blink = 0; /* DMA tiles, map, palette */ }
+//!     fn unload() { }
+//! }
+//!
+//! #[entry]
+//! fn reset() -> ! {
+//!     snes_init();
+//!     SceneController::transition!(Title, SceneNone, FadeIn);
+//!     SceneController::run();
+//! }
+//!
+//! #[interrupt(nmi)]
+//! fn vblank() { SceneController::nmi!(); }
+//! ```
+//!
+//! See README.md for the lifecycle, the NMI handshake and the cost model.
+
+include!("stdlib/sneslib.r65")
+include!("stdlib/U32.r65")
+
+/// What the controller calls every frame on whatever is running: the current
+/// scene while it is Active, its transition while one runs. Scenes and
+/// transitions both implement it. Both hooks are required: one with nothing
+/// to do writes an empty body.
+trait SceneHooks {
+    /// Main loop: once per frame.
+    fn update();
+
+    /// NMI: once per vblank after a completed frame, after the `update` of
+    /// that frame. Never on a lag frame. Keep it to PPU writes and VRAM,
+    /// CGRAM and OAM uploads.
+    fn nmi();
+}
+
+/// One screen of a game: a title, a level, a game-over page. Its `update`
+/// and `nmi` (from `SceneHooks`) run while it is the current scene and
+/// Active; during its transitions only the transition's hooks run. Every hook
+/// here runs in the main loop.
+trait Scene: SceneHooks {
+    /// Load: set up VRAM, CGRAM, PPU registers and the scene's state. It runs
+    /// in whatever screen state the Transition Out left: after a fade to
+    /// force blank it may DMA freely and take many frames.
+    fn load();
+
+    /// After Transition Out, when the scene is left. Undo the PPU state
+    /// `load` set up that the next scene would not set for itself: HDMA,
+    /// colour math, windows.
+    fn unload();
+}
+
+/// A transition between two scenes: its `update` (from `SceneHooks`) runs in
+/// the main loop and its `nmi` in vblank, once each per frame, until `done`
+/// returns true. The `nmi` half may write PPU registers. Its clock is
+/// `SceneController::frame!()`, the frames since it began, so a transition
+/// needs no state of its own; one that wants some keeps it in a static.
+/// Every hook is required: a transition that has nothing to do in one writes
+/// an empty body.
+trait SceneTransition: SceneHooks {
+    /// Asked once per frame before `update`, from the second frame on: so
+    /// the first `update` and `nmi` always run. True ends the transition.
+    fn done() -> bool;
+}
+
+/// What the controller does with the current scene each frame: run it
+/// (Active), start an accepted request at the next frame boundary (Pending),
+/// or run one of the request's transitions (Out, In).
+enum ScenePhase { Active, Pending, Out, In }
+
+/// A scene's hooks, as the controller keeps them.
+struct SceneHookSet {
+    update: fn(),
+    nmi: fn(),
+    load: fn(),
+    unload: fn(),
+}
+
+/// A transition's hooks, as the controller keeps them.
+struct SceneTransitionHookSet {
+    update: fn(),
+    nmi: fn(),
+    done: fn() -> bool,
+}
+
+/// Runs the scenes: the frame loop, the NMI and the transitions. There is
+/// one, `SCENE_CONTROLLER`, and the game drives it through associated
+/// functions and macros: `SceneController::transition!(Game, FadeOut,
+/// FadeIn)`.
+///
+/// It holds every hook as a far function pointer. A request hands it the
+/// hooks of the types it names; `update` and `nmi` are the ones that run each
+/// frame, copied from the current scene or the running transition, and the
+/// rest are called when the lifecycle reaches them.
+struct SceneController {
+    /// The hooks of the current scene. Its `update` and `nmi` are the ones
+    /// that run: the scene's while Active, the running transition's during
+    /// Out and In, put back from `next` once In is done. The NMI handler
+    /// calls `current.nmi` in place.
+    current: SceneHookSet,
+    /// The hooks of the scene a request brings in. They stay until the next
+    /// request, so `activate` can put its `update` and `nmi` back after In.
+    next: SceneHookSet,
+    /// The hooks of the pending request's Out transition.
+    trans_out: SceneTransitionHookSet,
+    /// The hooks of its In transition.
+    trans_in: SceneTransitionHookSet,
+    phase: ScenePhase,
+    /// Set by the main loop when a frame is complete; cleared by the NMI,
+    /// which only then calls a hook.
+    frame_done: u8,
+    /// NMIs that found the frame unfinished: an `update` that overran, and
+    /// also every NMI while a `load` runs (it may take frames) and before
+    /// `run` steps its first frame. Never reset; it wraps at 65535.
+    lag: u16,
+    /// Frames since the running transition began; `frame!()` is its low
+    /// word.
+    frame: U32,
+}
+
+/// One frame, as a `U32`: what the controller adds to `frame` each frame of
+/// a transition.
+const SCENE_ONE_FRAME: U32 = U32!(1);
+
+/// No transition: `SceneNone`, for either transition of a `goto`. The
+/// controller skips it, so the scene changes at the frame boundary and the
+/// screen stays as it is.
+struct SceneNone;
+
+impl SceneHooks for SceneNone {
+    fn update() { }
+    fn nmi() { }
+}
+
+impl SceneTransition for SceneNone {
+    fn done() -> bool { return true; }
+}
+
+/// The scene before the game's first `goto`: its hooks do nothing.
+struct SceneEmpty;
+
+impl SceneHooks for SceneEmpty {
+    fn update() { }
+    fn nmi() { }
+}
+
+impl Scene for SceneEmpty {
+    fn load() { }
+    fn unload() { }
+}
+
+/// The controller: `SceneEmpty`, Active, with nothing pending. It is set
+/// before the `#[entry]` body runs, so before `snes_init` turns the NMI on.
+/// It lives in low RAM, where `JML [abs]` reads its hooks in place. A game
+/// that never uses it doesn't get it: an unused static is dropped.
+#[lowram]
+static mut SCENE_CONTROLLER: SceneController = SceneController {
+    current: SceneHookSet {
+        update: SceneEmpty::update,
+        nmi: SceneEmpty::nmi,
+        load: SceneEmpty::load,
+        unload: SceneEmpty::unload,
+    },
+    next: SceneHookSet {
+        update: SceneEmpty::update,
+        nmi: SceneEmpty::nmi,
+        load: SceneEmpty::load,
+        unload: SceneEmpty::unload,
+    },
+    trans_out: SceneTransitionHookSet {
+        update: SceneNone::update,
+        nmi: SceneNone::nmi,
+        done: SceneNone::done,
+    },
+    trans_in: SceneTransitionHookSet {
+        update: SceneNone::update,
+        nmi: SceneNone::nmi,
+        done: SceneNone::done,
+    },
+    phase: ScenePhase::Active,
+    frame_done: 0,
+    lag: 0,
+    frame: U32!(0),
+};
+
+impl SceneController {
+    /// The body of the game's NMI handler, the vblank half of a frame:
+    /// `#[interrupt(nmi)] fn vblank() { SceneController::nmi!(); }`. Once the
+    /// main loop has finished a frame, it calls the running scene's or
+    /// transition's `nmi`; otherwise it counts a lag frame. A macro, so it is
+    /// always inlined into the handler: one `JML [nmi]`, no call to reach it.
+    macro_rules! nmi() {
+        clear_nmi!();
+        if SCENE_CONTROLLER.frame_done == 0 {
+            SCENE_CONTROLLER.lag++;
+        } else {
+            let scene_nmi_hook: fn() = SCENE_CONTROLLER.current.nmi;
+            scene_nmi_hook();
+            SCENE_CONTROLLER.frame_done = 0;
+        }
+    }
+
+    /// Changes to the scene `$next` at the next frame boundary, with no
+    /// transition: the screen stays as it is, and `$next`'s `load` turns it
+    /// on if it needs to. A type, not a value: `goto!(Title)`. False if the
+    /// controller is not Active or a request is pending.
+    macro_rules! goto($next:ident) {
+        SceneController::request(
+            $next::update, $next::nmi, $next::load, $next::unload,
+            SceneNone::update, SceneNone::nmi, SceneNone::done,
+            SceneNone::update, SceneNone::nmi, SceneNone::done)
+    }
+
+    /// Changes to the scene `$next` through two transitions: `$out` takes the
+    /// current scene off screen, `$in` brings `$next` on; either may be
+    /// `SceneNone`. Types, not values: `transition!(Game, FadeOut, FadeIn)`.
+    /// False if the controller is not Active or a request is pending. The
+    /// game's first request, before `run`, is a `transition!` with no Out, or
+    /// a `goto!`.
+    macro_rules! transition($next:ident, $out:ident, $in:ident) {
+        SceneController::request(
+            $next::update, $next::nmi, $next::load, $next::unload,
+            $out::update, $out::nmi, $out::done,
+            $in::update, $in::nmi, $in::done)
+    }
+
+    /// The main loop: one step per frame, then wait for the NMI to take the
+    /// finished frame. Request the first scene before calling it, with
+    /// `transition!(First, SceneNone, FadeIn)`, after `snes_init()` (which leaves
+    /// force blank on and the NMI enabled); until then nothing runs.
+    fn run() -> ! {
+        loop {
+            SceneController::step();
+            SCENE_CONTROLLER.frame_done = 1;
+            while SCENE_CONTROLLER.frame_done != 0 {
+                wait_nmi!();
+            }
+        }
+    }
+
+    /// Frames since the running transition began, as a `u16`: 0 in its
+    /// first `update` and `nmi`, 1 in its second, and in `done` from the
+    /// second frame on. The clock of every transition, so none keeps a
+    /// counter of its own. It is the low word of the `U32`
+    /// `SCENE_CONTROLLER.frame`, which counts on past 65535.
+    macro_rules! frame() { SCENE_CONTROLLER.frame.lo }
+
+    /// Records a request, if one is accepted now: the controller is Active
+    /// (so nothing is pending either). It takes the hooks of the scene and
+    /// the two transitions the request names (`goto!` and `transition!` pass
+    /// them). `phase` is written last: it is what `step` looks at.
+    fn request(update: fn(), nmi: fn(), load: fn(), unload: fn(),
+               out_update: fn(), out_nmi: fn(), out_done: fn() -> bool,
+               in_update: fn(), in_nmi: fn(), in_done: fn() -> bool) -> bool {
+        if SCENE_CONTROLLER.phase != ScenePhase::Active { return false; }
+        SCENE_CONTROLLER.next.update = update;
+        SCENE_CONTROLLER.next.nmi = nmi;
+        SCENE_CONTROLLER.next.load = load;
+        SCENE_CONTROLLER.next.unload = unload;
+        SCENE_CONTROLLER.trans_out.update = out_update;
+        SCENE_CONTROLLER.trans_out.nmi = out_nmi;
+        SCENE_CONTROLLER.trans_out.done = out_done;
+        SCENE_CONTROLLER.trans_in.update = in_update;
+        SCENE_CONTROLLER.trans_in.nmi = in_nmi;
+        SCENE_CONTROLLER.trans_in.done = in_done;
+        SCENE_CONTROLLER.phase = ScenePhase::Pending;
+        return true;
+    }
+
+    /// The main-loop half of a frame: move the lifecycle on if a request is
+    /// under way, then one `update` of whatever is running.
+    fn step() {
+        if SCENE_CONTROLLER.phase != ScenePhase::Active {
+            SceneController::advance();
+        }
+        let update: fn() = SCENE_CONTROLLER.current.update;
+        update();
+    }
+
+    /// Moves a request on: start it at the frame boundary after it was made
+    /// (Pending), or end its running transition once `done` says so.
+    fn advance() {
+        if SCENE_CONTROLLER.phase == ScenePhase::Pending {
+            if SCENE_CONTROLLER.trans_out.done == SceneNone::done {
+                SceneController::switch();
+            } else {
+                SceneController::begin_out();
+            }
+        } else if SCENE_CONTROLLER.phase == ScenePhase::Out {
+            SCENE_CONTROLLER.frame += SCENE_ONE_FRAME;
+            let done: fn() -> bool = SCENE_CONTROLLER.trans_out.done;
+            if done() {
+                SceneController::switch();
+            }
+        } else {
+            SCENE_CONTROLLER.frame += SCENE_ONE_FRAME;
+            let done: fn() -> bool = SCENE_CONTROLLER.trans_in.done;
+            if done() {
+                SceneController::activate();
+            }
+        }
+    }
+
+    /// Transition Out starts: its clock at 0, its hooks run.
+    fn begin_out() {
+        SCENE_CONTROLLER.phase = ScenePhase::Out;
+        SCENE_CONTROLLER.frame.lo = 0;
+        SCENE_CONTROLLER.frame.hi = 0;
+        SCENE_CONTROLLER.current.update = SCENE_CONTROLLER.trans_out.update;
+        SCENE_CONTROLLER.current.nmi = SCENE_CONTROLLER.trans_out.nmi;
+    }
+
+    /// Transition In starts: its clock at 0, its hooks run.
+    fn begin_in() {
+        SCENE_CONTROLLER.phase = ScenePhase::In;
+        SCENE_CONTROLLER.frame.lo = 0;
+        SCENE_CONTROLLER.frame.hi = 0;
+        SCENE_CONTROLLER.current.update = SCENE_CONTROLLER.trans_in.update;
+        SCENE_CONTROLLER.current.nmi = SCENE_CONTROLLER.trans_in.nmi;
+    }
+
+    /// The end of Transition Out: the current scene's `unload`, the new
+    /// scene installed and its `load`, then Transition In begins, or with
+    /// none, the new scene is Active at once.
+    fn switch() {
+        let unload: fn() = SCENE_CONTROLLER.current.unload;
+        unload();
+        SceneController::install();
+        let load: fn() = SCENE_CONTROLLER.current.load;
+        load();
+        if SCENE_CONTROLLER.trans_in.done == SceneNone::done {
+            SceneController::activate();
+        } else {
+            SceneController::begin_in();
+        }
+    }
+
+    /// The request is done: the current scene runs. Its `update` and `nmi`
+    /// come back from `next`, which no request can change before this.
+    fn activate() {
+        SCENE_CONTROLLER.phase = ScenePhase::Active;
+        SCENE_CONTROLLER.current.update = SCENE_CONTROLLER.next.update;
+        SCENE_CONTROLLER.current.nmi = SCENE_CONTROLLER.next.nmi;
+    }
+
+    /// Installs the pending scene, `next`, as the current one.
+    fn install() {
+        SCENE_CONTROLLER.current.update = SCENE_CONTROLLER.next.update;
+        SCENE_CONTROLLER.current.nmi = SCENE_CONTROLLER.next.nmi;
+        SCENE_CONTROLLER.current.load = SCENE_CONTROLLER.next.load;
+        SCENE_CONTROLLER.current.unload = SCENE_CONTROLLER.next.unload;
+    }
+}
