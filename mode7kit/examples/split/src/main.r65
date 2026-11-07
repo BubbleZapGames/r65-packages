@@ -1,0 +1,111 @@
+//! mode7kit split example: two perspective floors on one screen, each
+//! following its own camera, as in a two-player racer.
+//!
+//! `views.r65`: the default floor `M7Floor` follows `M7K_CAMERA` in the
+//! top half; a second instance, `FloorB`, follows `CAM_B` in the bottom
+//! half. `Split` (`m7k_split!`) stacks them, with a sky band in each half
+//! (bands `Bands4`, four of them, no COLDATA) and each band's BG1 view by
+//! HDMA (`M7Views`): the sky is BG1 in Mode 1, so each half's sky scrolls
+//! with its own camera. Pad 1: D-pad left/right turn and up/down fly the
+//! top camera; Y/A turn and X/B fly the bottom one.
+//!
+//! Graphics: dizworld by Brad Smith (CC BY 4.0), with art by Sharm and
+//! KnoblePersona from OpenGameArt; see ../flyer/README.md.
+
+#[snesrom(name="MODE7KIT SPLIT", hirom, fastrom)]
+
+#[stack(0x0100, 0x01FF)]
+
+include!("stdlib/65816.r65")
+include!("stdlib/sneslib.r65")
+include!("mode7kit/views.r65")
+
+#[bank(0)]
+
+const VRAM_SKY_CHR: u16 = 0x6000;
+const VRAM_SKY_MAP: u16 = 0x6C00;
+
+/// The bottom half's camera, facing the other way.
+#[lowram]
+static mut CAM_B: M7Camera = M7Camera {
+    x: M7Coord(0x8000), y: M7Coord(0x8000), angle: 128,
+};
+
+/// The bottom half's floor, over the same transport as `M7Floor`.
+m7k_floor!(FloorB, FLOOR_B, M7HDMA, M7K_HDMA, CAM_B, m7k_rows_mul);
+/// Four bands, a sky and a floor per half; no haze, so no COLDATA channel.
+m7k_bands!(Bands4, BANDS4, M7HDMA, 4, 4, 5);
+/// The two floors stacked.
+m7k_split!(Split, SPLIT, M7HDMA, Bands4, M7Views, M7Floor, FloorB);
+
+struct Game {
+    frames: u16,
+    pad: u16,
+}
+
+#[lowram]
+static mut GAME: Game = Game { frames: 0, pad: 0 };
+
+fn held(button: u16) -> bool {
+    return GAME.pad & button != 0;
+}
+
+fn update() {
+    if held(JOY_LEFT) { M7K_CAMERA.turn(2); }
+    if held(JOY_RIGHT) { M7K_CAMERA.turn(-2); }
+    if held(JOY_UP) { M7K_CAMERA.forward(128); }
+    if held(JOY_DOWN) { M7K_CAMERA.forward(-128); }
+    if held(JOY_Y) { CAM_B.turn(2); }
+    if held(JOY_A) { CAM_B.turn(-2); }
+    if held(JOY_X) { CAM_B.forward(128); }
+    if held(JOY_B) { CAM_B.forward(-128); }
+    Split::update();
+}
+
+#[interrupt(nmi)]
+fn nmi_handler() {
+    clear_nmi!();
+    Split::nmi();
+    INIDISP = 0x0F;
+    GAME.frames++;
+}
+
+#[entry]
+fn main() -> ! {
+    snes_init();
+    INIDISP = 0x80;
+    NMITIMEN = 0;
+
+    mode7_upload_interleaved!(BG_MD7_DATA);
+    dma_copy_vram_const!(0, SKY_CHR_DATA, VRAM_SKY_CHR, 5888);
+    dma_copy_vram_const!(0, SKY_NMT_DATA, VRAM_SKY_MAP, 1920);
+    dma_copy_cgram_const!(0, BG_PAL_DATA, 0, 29);
+    CGADD = 0;                       // backdrop: dizworld's sky blue
+    CGDATA = 0xF1;
+    CGDATA = 0x76;
+
+    set_bg12_chr!(6, 0);             // the sky on BG1: chr at word $6000
+    set_bg1_map!(0x1B, 0);           // BG1 map at word $6C00
+
+    // looking down a little, so each 112-line half shows more floor
+    M7Floor::set_pitch(-24);
+    FloorB::set_pitch(-24);
+    Split::set_sky(0x01, 0x01, 0x01);                // Mode 1 sky and Mode 7 floors, both BG1
+    Split::setup(M7Repeat::Wrap, M7Flip::None);
+    M7K_CAMERA.set(M7Coord::from_texel(512), M7Coord::from_texel(512));
+    CAM_B.set(M7Coord::from_texel(300), M7Coord::from_texel(700));
+    NMITIMEN = Interrupt::Nmi as u8 | Interrupt::AutoJoy as u8;
+
+    loop {
+        wait_nmi!();
+        wait_autojoy!();
+        GAME.pad = (JOY1H as u16) << 8 | JOY1L as u16;
+        update();
+    }
+}
+
+#[bank(1)]
+static BG_MD7_DATA = include_bytes!("../../flyer/assets/bg.md7");
+static SKY_CHR_DATA = include_bytes!("../../flyer/assets/sky.chr");
+static SKY_NMT_DATA = include_bytes!("../../flyer/assets/sky.nmt");
+static BG_PAL_DATA = include_bytes!("../../flyer/assets/bg.pal");

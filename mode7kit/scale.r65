@@ -1,0 +1,31 @@
+//! mode7kit scaling: a compile-time reciprocal table.
+//!
+//! Includes `core.r65`. Adds `M7K_RECIP` (512 bytes of ROM) and
+//! `m7k_recip`, which both modes use. A zoom is a `u8` per screen axis: 64
+//! is 1.0×, 128 magnifies 2×, 16 shrinks to ¼×. Zoom is linear in on-screen
+//! size, so stepping it by one a frame zooms smoothly.
+//!
+//! ```
+//! include!("mode7kit/scale.r65")
+//!
+//! let texel: u16 = m7k_recip(zoom);   // texels per pixel, 8.8
+//! ```
+
+include!("mode7kit/core.r65")
+
+const fn m7k_build_recip() -> [u16; 256] {
+    let mut t: [u16; 256] = [0; 256];
+    t[0] = 0x7FFF;
+    for z in 1..256 {
+        t[z] = 16384 / (z as u16);
+    }
+    return t;
+}
+
+/// 16384 / zoom: texels per screen pixel (8.8) at that zoom.
+static M7K_RECIP: [u16; 256] = m7k_build_recip();
+
+/// Texels per screen pixel at `zoom`, 8.8.
+fn m7k_recip(zoom: u8) -> u16 {
+    return M7K_RECIP[zoom as u16];
+}

@@ -1,0 +1,266 @@
+//! mode7kit Static mode: one matrix a frame, committed in vblank.
+//!
+//! Includes `rotate.r65`, `scale.r65` and `world.r65`; adds no table.
+//! `M7Static` implements `Mode7` with its own copy of the matrix, its
+//! inverse, the center, the scroll and M7SEL, in the `M7K_STATIC`
+//! singleton. It touches no HDMA register: a Static game owns HDMAEN and
+//! may run its own HDMA on any channel.
+//!
+//! `update()` turns the view to `M7Camera`'s heading, scales it by the
+//! zoom, and pins the camera to the pivot pixel. A game that builds its
+//! own matrix skips `update()` and uses the manual setters below.
+//!
+//! ```
+//! include!("mode7kit/static.r65")
+//!
+//! M7Static::setup(M7Repeat::Wrap, M7Flip::None);   // in force blank
+//! loop {
+//!     wait_nmi!();
+//!     M7K_CAMERA.turn(1);
+//!     M7Static::set_zoom(80, 80);
+//!     M7Static::update();
+//!     let sx, sy, size = M7Static::to_screen(enemy_x, enemy_y);
+//! }
+//!
+//! #[interrupt(nmi)]
+//! fn vblank() { M7Static::nmi(); }
+//! ```
+
+include!("mode7kit/rotate.r65")
+include!("mode7kit/scale.r65")
+include!("mode7kit/world.r65")
+
+/// Static mode's state: the registers as the next vblank writes them,
+/// plus what the projections and `update()` need. Matrix entries are 8.8
+/// signed fixed point: 0x0100 is 1.0.
+struct M7Static {
+    /// M7SEL: `M7Repeat as u8 | M7Flip as u8`.
+    sel: u8,
+    /// M7A..M7D: texels per screen pixel (A, C) and per screen line (B, D).
+    a: i16,
+    b: i16,
+    c: i16,
+    d: i16,
+    /// The inverse matrix: screen pixels per texel, 8.8.
+    ia: i16,
+    ib: i16,
+    ic: i16,
+    id: i16,
+    /// M7X, M7Y: the center the matrix pivots around, in texels.
+    cx: u16,
+    cy: u16,
+    /// BG1HOFS/BG1VOFS (M7HOFS/M7VOFS), in texels.
+    hofs: u16,
+    vofs: u16,
+    /// The screen pixel the center is pinned to.
+    px: u8,
+    py: u8,
+    /// Zoom per screen axis, 64 = 1.0×: what `update()` scales by.
+    zx: u8,
+    zy: u8,
+}
+
+/// Starts as the identity at the screen center, so the first NMI after
+/// power-on commits a sane picture before the game has called anything.
+#[lowram]
+static mut M7K_STATIC: M7Static = M7Static {
+    sel: 0,
+    a: 0x100, b: 0, c: 0, d: 0x100,
+    ia: 0x100, ib: 0, ic: 0, id: 0x100,
+    cx: 0, cy: 0, hofs: 0, vofs: 0,
+    px: 128, py: 112,
+    zx: 64, zy: 64,
+};
+
+impl Mode7 for M7Static {
+    /// Puts the PPU in Mode 7 and sets M7SEL. The game still owns TM.
+    fn setup(repeat: M7Repeat, flip: M7Flip) {
+        BGMODE = 0x07;
+        M7K_STATIC.sel = repeat as u8 | flip as u8;
+        M7SEL = M7K_STATIC.sel;
+    }
+
+    /// Turns by the camera's heading, scales by the zoom, and pins the
+    /// camera's texel to the pivot pixel.
+    fn update() {
+        M7Static::rotate_scale(M7K_CAMERA.angle, M7K_STATIC.zx, M7K_STATIC.zy);
+        let cx: u16 = M7K_CAMERA.x.texel();
+        let cy: u16 = M7K_CAMERA.y.texel();
+        M7K_STATIC.cx = cx;
+        M7K_STATIC.cy = cy;
+        M7K_STATIC.hofs = cx - M7K_STATIC.px as u16;
+        M7K_STATIC.vofs = cy - M7K_STATIC.py as u16;
+    }
+
+    /// Writes M7A-D, M7SEL, the center and the scroll. Never HDMAEN.
+    fn nmi() {
+        m7k_write_matrix(M7K_STATIC.a, M7K_STATIC.b, M7K_STATIC.c, M7K_STATIC.d);
+        m7k_write_view(M7K_STATIC.sel, M7K_STATIC.cx, M7K_STATIC.cy,
+                       M7K_STATIC.hofs, M7K_STATIC.vofs);
+    }
+
+    /// S = P + M⁻¹·(W - C), then the reflection. Points off screen get
+    /// coordinates outside 0..255 / 0..223; sy is never `M7K_HIDDEN`. The
+    /// size is the horizontal texel size, `zx << 2`.
+    fn to_screen(x: M7Coord, y: M7Coord) -> i16, i16, u16 {
+        let dx, dy = m7k_from_center(x, y, M7K_STATIC.cx, M7K_STATIC.cy);
+        let mut sx: i16 = M7K_STATIC.px as i16
+            + m7k_smul_shr14(M7K_STATIC.ia, dx) + m7k_smul_shr14(M7K_STATIC.ib, dy);
+        let mut sy: i16 = M7K_STATIC.py as i16
+            + m7k_smul_shr14(M7K_STATIC.ic, dx) + m7k_smul_shr14(M7K_STATIC.id, dy);
+        let flip: M7Flip = M7Static::flip();
+        if flip.horizontal() { sx = 255 - sx; }
+        if flip.vertical() { sy = 255 - sy; }
+        return sx, sy, (M7K_STATIC.zx as u16) << 2;
+    }
+
+    /// W = C + M·(S - P), after undoing the reflection.
+    fn to_world(sx: i16, sy: i16) -> bool, M7Coord, M7Coord {
+        let flip: M7Flip = M7Static::flip();
+        let mut x: i16 = sx;
+        let mut y: i16 = sy;
+        if flip.horizontal() { x = 255 - x; }
+        if flip.vertical() { y = 255 - y; }
+        let ox: i16 = x - M7K_STATIC.px as i16;
+        let oy: i16 = y - M7K_STATIC.py as i16;
+        let dx: i16 = m7k_smul_shr2(M7K_STATIC.a, ox) + m7k_smul_shr2(M7K_STATIC.b, oy);
+        let dy: i16 = m7k_smul_shr2(M7K_STATIC.c, ox) + m7k_smul_shr2(M7K_STATIC.d, oy);
+        let wraps: bool = M7Static::repeat().wraps();
+        let on: bool = m7k_on_map(wraps, M7K_STATIC.cx, dx)
+            && m7k_on_map(wraps, M7K_STATIC.cy, dy);
+        let wx: M7Coord = M7Coord((M7K_STATIC.cx << 6) + dx as u16);
+        let wy: M7Coord = M7Coord((M7K_STATIC.cy << 6) + dy as u16);
+        return on, wx, wy;
+    }
+
+    fn sel() -> u8 {
+        return M7K_STATIC.sel;
+    }
+
+    fn set_sel(sel: u8) {
+        M7K_STATIC.sel = sel;
+    }
+}
+
+impl M7Static {
+    // -- properties `update()` reads ----------------------------------------
+
+    /// The zoom per screen axis, 64 = 1.0×.
+    fn set_zoom(zx: u8, zy: u8) {
+        M7K_STATIC.zx = zx;
+        M7K_STATIC.zy = zy;
+    }
+
+    /// The zoom, x then y.
+    fn zoom() -> u8, u8 {
+        return M7K_STATIC.zx, M7K_STATIC.zy;
+    }
+
+    /// The screen pixel the camera is pinned to; `(M7_CENTER_X,
+    /// M7_CENTER_Y)` by default.
+    fn set_pivot(sx: u8, sy: u8) {
+        M7K_STATIC.px = sx;
+        M7K_STATIC.py = sy;
+    }
+
+    // -- manual control, for a game that doesn't call update() --------------
+
+    /// Rotates the view by `angle`: A = D = cos, B = sin, C = -sin, and the
+    /// inverse (the transpose) to match. No multiply.
+    fn rotate(angle: u8) {
+        let s: i16 = m7k_sin(angle);
+        let c: i16 = m7k_cos(angle);
+        M7K_STATIC.a = c;
+        M7K_STATIC.b = s;
+        M7K_STATIC.c = 0 - s;
+        M7K_STATIC.d = c;
+        M7K_STATIC.ia = c;
+        M7K_STATIC.ib = 0 - s;
+        M7K_STATIC.ic = s;
+        M7K_STATIC.id = c;
+    }
+
+    /// Scales the horizontal screen axis by `zx` and the vertical by `zy`,
+    /// unrotated: A = 1/zx, D = 1/zy, B = C = 0. No multiply.
+    fn scale(zx: u8, zy: u8) {
+        M7K_STATIC.a = m7k_recip(zx) as i16;
+        M7K_STATIC.b = 0;
+        M7K_STATIC.c = 0;
+        M7K_STATIC.d = m7k_recip(zy) as i16;
+        M7K_STATIC.ia = (zx as u16 << 2) as i16;
+        M7K_STATIC.ib = 0;
+        M7K_STATIC.ic = 0;
+        M7K_STATIC.id = (zy as u16 << 2) as i16;
+    }
+
+    /// Rotates by `angle`, then scales the horizontal screen axis by `zx`
+    /// and the vertical by `zy` (64 = 1.0×):
+    ///
+    /// A = cos/sx, B = sin/sy, C = -sin/sx, D = cos/sy
+    ///
+    /// The inverse is diag(sx, sy)·Rᵀ. Equal zooms take the 2-multiply path.
+    fn rotate_scale(angle: u8, zx: u8, zy: u8) {
+        let s: i16 = m7k_sin(angle);
+        let c: i16 = m7k_cos(angle);
+        let kx: u16 = m7k_recip(zx);
+        let ca: i16 = m7k_smul_q8(c, kx);
+        let sa: i16 = m7k_smul_q8(s, kx);
+        // inverse rows: sx·(cos, -sin), sy·(sin, cos); zoom/64 is zoom << 2 in 8.8
+        let icx: i16 = m7k_smul_q8(c, zx as u16 << 2);
+        let isx: i16 = m7k_smul_q8(s, zx as u16 << 2);
+        M7K_STATIC.a = ca;
+        M7K_STATIC.c = 0 - sa;
+        M7K_STATIC.ia = icx;
+        M7K_STATIC.ib = 0 - isx;
+        if zx == zy {
+            M7K_STATIC.b = sa;
+            M7K_STATIC.d = ca;
+            M7K_STATIC.ic = isx;
+            M7K_STATIC.id = icx;
+        } else {
+            let ky: u16 = m7k_recip(zy);
+            M7K_STATIC.b = m7k_smul_q8(s, ky);
+            M7K_STATIC.d = m7k_smul_q8(c, ky);
+            M7K_STATIC.ic = m7k_smul_q8(s, zy as u16 << 2);
+            M7K_STATIC.id = m7k_smul_q8(c, zy as u16 << 2);
+        }
+    }
+
+    /// The identity matrix and its inverse: one texel per pixel, unrotated.
+    fn identity() {
+        M7K_STATIC.a = 0x100;
+        M7K_STATIC.b = 0;
+        M7K_STATIC.c = 0;
+        M7K_STATIC.d = 0x100;
+        M7K_STATIC.ia = 0x100;
+        M7K_STATIC.ib = 0;
+        M7K_STATIC.ic = 0;
+        M7K_STATIC.id = 0x100;
+    }
+
+    /// Writes the matrix directly, for a game that computes its own. Pair
+    /// it with `set_inverse` to use the projections.
+    fn set_matrix(a: i16, b: i16, c: i16, d: i16) {
+        M7K_STATIC.a = a;
+        M7K_STATIC.b = b;
+        M7K_STATIC.c = c;
+        M7K_STATIC.d = d;
+    }
+
+    /// The inverse of a matrix given to `set_matrix`.
+    fn set_inverse(ia: i16, ib: i16, ic: i16, id: i16) {
+        M7K_STATIC.ia = ia;
+        M7K_STATIC.ib = ib;
+        M7K_STATIC.ic = ic;
+        M7K_STATIC.id = id;
+    }
+
+    /// The center (texels) and the scroll, directly. The projections still
+    /// measure from the pivot pixel.
+    fn set_center(cx: u16, cy: u16, hofs: u16, vofs: u16) {
+        M7K_STATIC.cx = cx;
+        M7K_STATIC.cy = cy;
+        M7K_STATIC.hofs = hofs;
+        M7K_STATIC.vofs = vofs;
+    }
+}

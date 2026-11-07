@@ -1,0 +1,109 @@
+//! mode7kit top-down example: dizworld's Mode 7 map, seen from above.
+//!
+//! `static.r65`: `M7Static`, one matrix a frame. D-pad up/down move along
+//! the heading and left/right move across it, L/R turn, A/X zoom in and
+//! out, Y/B stretch the vertical axis only.
+//!
+//! Graphics: dizworld by Brad Smith (CC BY 4.0), with art by Sharm from
+//! OpenGameArt; see README.md.
+
+#[snesrom(name="MODE7KIT TOPDOWN", hirom, fastrom)]
+
+#[stack(0x0100, 0x01FF)]
+
+include!("stdlib/65816.r65")
+include!("stdlib/sneslib.r65")
+include!("mode7kit/static.r65")
+
+#[bank(0)]
+
+// ============================================================================
+// STATE
+// ============================================================================
+
+/// The pad, and a frame counter. The view itself lives in mode7kit: the
+/// heading in `M7K_CAMERA`, the zoom in `M7K_STATIC`, where the tests write
+/// them.
+struct Game {
+    frames: u16,
+    pad: u16,
+    pad_prev: u16,
+}
+
+#[lowram]
+static mut GAME: Game = Game { frames: 0, pad: 0, pad_prev: 0 };
+
+// ============================================================================
+// UPDATE
+// ============================================================================
+
+fn held(button: u16) -> bool {
+    return GAME.pad & button != 0;
+}
+
+fn update() {
+    if held(JOY_L) { M7K_CAMERA.turn(1); }
+    if held(JOY_R) { M7K_CAMERA.turn(-1); }
+    let zx, zy = M7Static::zoom();
+    if held(JOY_A) && zx < 255 { M7Static::set_zoom(zx + 1, zy + 1); }
+    if held(JOY_X) && zx > 16 { M7Static::set_zoom(zx - 1, zy - 1); }
+    let zx2, zy2 = M7Static::zoom();
+    if held(JOY_Y) && zy2 < 255 { M7Static::set_zoom(zx2, zy2 + 1); }
+    if held(JOY_B) && zy2 > 16 { M7Static::set_zoom(zx2, zy2 - 1); }
+    // Up/Down along the heading, Left/Right across it, two texels a frame
+    if held(JOY_UP) { M7K_CAMERA.forward(128); }
+    if held(JOY_DOWN) { M7K_CAMERA.forward(-128); }
+    if held(JOY_RIGHT) { M7K_CAMERA.strafe(128); }
+    if held(JOY_LEFT) { M7K_CAMERA.strafe(-128); }
+    M7Static::update();
+}
+
+// ============================================================================
+// NMI
+// ============================================================================
+
+#[interrupt(nmi)]
+fn nmi_handler() {
+    clear_nmi!();
+    M7Static::nmi();
+    INIDISP = 0x0F;
+    GAME.frames++;
+}
+
+// ============================================================================
+// ENTRY
+// ============================================================================
+
+#[entry]
+fn main() -> ! {
+    snes_init();
+    INIDISP = 0x80;
+    NMITIMEN = 0;
+
+    mode7_upload_interleaved!(BG_MD7_DATA);
+    dma_copy_cgram_const!(0, BG_PAL_DATA, 0, 29);
+    CGADD = 0;                       // backdrop: dizworld's sky blue
+    CGDATA = 0xF1;
+    CGDATA = 0x76;
+
+    M7Static::setup(M7Repeat::Wrap, M7Flip::None);
+    TM = 0x01;                       // BG1
+    M7K_CAMERA.set(M7Coord::from_texel(512), M7Coord::from_texel(512));
+    NMITIMEN = Interrupt::Nmi as u8 | Interrupt::AutoJoy as u8;
+
+    loop {
+        wait_nmi!();
+        wait_autojoy!();
+        GAME.pad_prev = GAME.pad;
+        GAME.pad = (JOY1H as u16) << 8 | JOY1L as u16;
+        update();
+    }
+}
+
+// ============================================================================
+// ASSETS (dizworld)
+// ============================================================================
+
+#[bank(1)]
+static BG_MD7_DATA = include_bytes!("../assets/bg.md7");
+static BG_PAL_DATA = include_bytes!("../assets/bg.pal");

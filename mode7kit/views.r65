@@ -1,0 +1,282 @@
+//! mode7kit views: a Mode 7 view per band of the screen, and a split
+//! screen of two floors.
+//!
+//! Includes `floor.r65` and `bands.r65`. `m7k_views!` writes a views type:
+//! the Mode 7 center (M7X/M7Y) and BG1 scroll per band, by direct-mode
+//! HDMA, double-buffered with a transport and shown on its `commit()`.
+//! `m7k_split!` writes a preset implementing `Mode7`: two floors stacked,
+//! each following its own camera, each half with a sky band above its
+//! floor, the sky on BG1 so each half scrolls its own.
+//!
+//! The default views instance is `M7Views` (state `M7K_VIEWS`): up to 4
+//! views on channels 1 (M7X/M7Y) and 7 (BG1HOFS/BG1VOFS), with `M7HDMA`.
+//! The split preset has no default instance: it needs a second floor.
+//!
+//! ```
+//! include!("mode7kit/views.r65")
+//!
+//! #[lowram]
+//! static mut CAM2: M7Camera = M7Camera { x: M7Coord(0x8000), y: M7Coord(0x8000), angle: 0 };
+//!
+//! m7k_floor!(Floor2, FLOOR2, M7HDMA, M7K_HDMA, CAM2, m7k_rows_mul);
+//! m7k_bands!(Bands4, BANDS4, M7HDMA, 4, 4, 5);       // 4 bands, no COLDATA
+//! m7k_split!(Split, SPLIT, M7HDMA, Bands4, M7Views, M7Floor, Floor2);
+//!
+//! Split::setup(M7Repeat::Wrap, M7Flip::None);       // force blank
+//! loop { wait_nmi!(); Split::update(); }
+//!
+//! #[interrupt(nmi)]
+//! fn vblank() { Split::nmi(); }
+//! ```
+
+include!("mode7kit/floor.r65")
+include!("mode7kit/bands.r65")
+
+/// `$name`, up to `$max` views with transport `$hdma`: the center on
+/// channel `$ch_center`, the BG1 scroll on `$ch_scroll`.
+macro_rules! m7k_views($name:ident, $state:ident, $hdma:ident, $max:expr, $ch_center:expr, $ch_scroll:expr) {
+    /// A views type's state. A view's table entry is a header and 4 bytes
+    /// (two write-twice registers); a view over 127 lines takes two.
+    struct $name {
+        count: u8,
+        lines: [u8; $max],
+        cx: [u16; $max],
+        cy: [u16; $max],
+        hofs: [u16; $max],
+        vofs: [u16; $max],
+        ctr: [u8; 2 * ($max * 10 + 1)],
+        scr: [u8; 2 * ($max * 10 + 1)],
+    }
+
+    #[lowram]
+    static mut $state: $name = $name {
+        count: 1,
+        lines: [0; $max],
+        cx: [0; $max], cy: [0; $max], hofs: [0; $max], vofs: [0; $max],
+        ctr: [0; 2 * ($max * 10 + 1)], scr: [0; 2 * ($max * 10 + 1)],
+    };
+
+    impl $name {
+        /// A table's stride per buffer.
+        const STRIDE: u16 = $max * 10 + 1;
+
+        /// The channels on buffer 0, both buffers filled, and the channels
+        /// in the transport's HDMAEN shadow. After the transport's setup.
+        fn setup() {
+            M7K_DMA[$ch_center].dmap = 0x03;       // direct, two write-twice registers
+            M7K_DMA[$ch_center].bbad = 0x1F;       // M7X, M7Y
+            M7K_DMA[$ch_center].a1t = &$state.ctr as u16;
+            M7K_DMA[$ch_center].a1b = 0x00;        // low RAM
+            M7K_DMA[$ch_scroll].dmap = 0x03;
+            M7K_DMA[$ch_scroll].bbad = 0x0D;       // BG1HOFS, BG1VOFS (M7HOFS/M7VOFS)
+            M7K_DMA[$ch_scroll].a1t = &$state.scr as u16;
+            M7K_DMA[$ch_scroll].a1b = 0x00;
+            $name::fill(0);
+            $name::fill(1);
+            $hdma::enable((1 << $ch_center) | (1 << $ch_scroll));
+        }
+
+        /// Takes the channels out of the transport's shadow.
+        fn stop() {
+            $hdma::disable((1 << $ch_center) | (1 << $ch_scroll));
+        }
+
+        /// How many views, 1..MAX.
+        fn set_count(n: u8) {
+            $state.count = n;
+        }
+
+        /// View `i`: `lines` lines (the last takes the rest), its center
+        /// (texels) and its scroll.
+        fn set_view(i: u8, lines: u8, cx: u16, cy: u16, hofs: u16, vofs: u16) {
+            let j: u16 = i as u16;
+            $state.lines[j] = lines;
+            $state.cx[j] = cx;
+            $state.cy[j] = cy;
+            $state.hofs[j] = hofs;
+            $state.vofs[j] = vofs;
+        }
+
+        /// Writes the back buffer's tables. Before the transport's finish.
+        fn fill_back() {
+            $name::fill($hdma::back_index());
+        }
+
+        /// Writes buffer `k`'s tables from the views.
+        fn fill(k: u8) {
+            let mut p: u16 = 0;
+            if k != 0 { p = $name::STRIDE; }
+            let last: u16 = ($state.count - 1) as u16;
+            let mut used: u8 = 0;
+            let mut i: u16 = 0;
+            while i <= last {
+                let mut n: u8 = $state.lines[i];
+                if i == last { n = 224 - used; }
+                used = used + n;
+                while n > 0 {
+                    let mut h: u8 = n;
+                    if h > 127 { h = 127; }
+                    $state.ctr[p] = h;
+                    $state.ctr[p + 1] = $state.cx[i] as u8;
+                    $state.ctr[p + 2] = ($state.cx[i] >> 8) as u8;
+                    $state.ctr[p + 3] = $state.cy[i] as u8;
+                    $state.ctr[p + 4] = ($state.cy[i] >> 8) as u8;
+                    $state.scr[p] = h;
+                    $state.scr[p + 1] = $state.hofs[i] as u8;
+                    $state.scr[p + 2] = ($state.hofs[i] >> 8) as u8;
+                    $state.scr[p + 3] = $state.vofs[i] as u8;
+                    $state.scr[p + 4] = ($state.vofs[i] >> 8) as u8;
+                    p = p + 5;
+                    n = n - h;
+                }
+                i++;
+            }
+            $state.ctr[p] = 0;
+            $state.scr[p] = 0;
+        }
+
+        /// Points the channels at buffer `k`, from a preset's `nmi()` when
+        /// the transport's `commit()` flipped.
+        fn show(k: u8) {
+            let mut off: u16 = 0;
+            if k != 0 { off = $name::STRIDE; }
+            M7K_DMA[$ch_center].a1t = (&$state.ctr as u16) + off;
+            M7K_DMA[$ch_scroll].a1t = (&$state.scr as u16) + off;
+        }
+    }
+}
+
+/// `$name`, a split screen: floor `$fa` over lines 0..half and `$fb` under
+/// it, on transport `$hdma`, with bands `$bands` (at least 4) and views
+/// `$views` (at least 4): per half, a sky band then a floor band. The sky
+/// layer is BG1 in the sky's BG mode, so the views' BG1 scroll gives each
+/// half's sky its own scroll, with no channel more; the game points BG1SC
+/// and BG12NBA at the sky (Mode 7 ignores them).
+macro_rules! m7k_split($name:ident, $state:ident, $hdma:ident, $bands:ident, $views:ident, $fa:ident, $fb:ident) {
+    struct $name {
+        sky_mode: u8,
+        sky_tm: u8,
+        ground_tm: u8,
+        /// Lines of the top half.
+        half: u8,
+    }
+
+    #[lowram]
+    static mut $state: $name = $name {
+        sky_mode: 0x01, sky_tm: 0x01, ground_tm: 0x01, half: 112,
+    };
+
+    impl $name {
+        /// The sky bands' BGMODE and TM (BG1 is the sky), and the floors'
+        /// TM. Before `setup`.
+        fn set_sky(sky_mode: u8, sky_tm: u8, ground_tm: u8) {
+            $state.sky_mode = sky_mode;
+            $state.sky_tm = sky_tm;
+            $state.ground_tm = ground_tm;
+        }
+
+        /// The top half's lines (112 by default). Before `setup`.
+        fn set_half(lines: u8) {
+            $state.half = lines;
+        }
+
+        /// A sky's BG1 scroll for a floor whose horizon is screen line
+        /// `horizon`: parallax that turns with the heading, and the bottom
+        /// of a 240-line sky on the horizon.
+        fn sky_view(i: u8, lines: u8, angle: u8, horizon: u8) {
+            let hofs: u16 = (0 - ((angle as u16) << 2)) & 0x03FF;
+            $views::set_view(i, lines, 0, 0, hofs, 240 - horizon as u16);
+        }
+    }
+
+    impl Mode7 for $name {
+        /// Both floors' setup, the four bands and the four views.
+        fn setup(repeat: M7Repeat, flip: M7Flip) {
+            $fa::setup(repeat, flip);
+            $fb::setup(repeat, flip);
+            let half: u8 = $state.half;
+            $bands::set_band(0, 32, $state.sky_mode, $state.sky_tm);
+            $bands::set_band(1, half - 32, 0x07, $state.ground_tm);
+            $bands::set_band(2, 32, $state.sky_mode, $state.sky_tm);
+            $bands::set_band(3, 0, 0x07, $state.ground_tm);
+            $bands::set_count(4);
+            $bands::set_haze(M7K_NO_HAZE);
+            $bands::setup();
+            $views::set_view(0, 32, 0, 0, 0, 0);
+            $views::set_view(1, half - 32, 0, 0, 0, 0);
+            $views::set_view(2, 32, 0, 0, 0, 0);
+            $views::set_view(3, 0, 0, 0, 0, 0);
+            $views::set_count(4);
+            $views::setup();
+        }
+
+        fn stop() {
+            $views::stop();
+            $bands::stop();
+            $fa::stop();
+        }
+
+        /// Both floors' builds, each in its half, the bands at their
+        /// horizons, the views, and one frame of four segments.
+        fn update() {
+            let half: u8 = $state.half;
+            $fa::build(0, half);
+            $fb::build(half, 224 - half);
+            let sky_a: u8 = $fa::sky();
+            let ground_a: u8 = $fa::ground();
+            let sky_b: u8 = $fb::sky() - half;
+            let ground_b: u8 = $fb::ground();
+            $bands::set_lines(0, sky_a);
+            $bands::set_lines(1, ground_a);
+            $bands::set_lines(2, sky_b);
+            $bands::fill_back();
+            $name::sky_view(0, sky_a, $fa::angle(), $fa::sky());
+            let acx, acy = $fa::center();
+            let ahofs, avofs = $fa::scroll();
+            $views::set_view(1, ground_a, acx, acy, ahofs, avofs);
+            $name::sky_view(2, sky_b, $fb::angle(), $fb::sky());
+            let bcx, bcy = $fb::center();
+            let bhofs, bvofs = $fb::scroll();
+            $views::set_view(3, 0, bcx, bcy, bhofs, bvofs);
+            $views::fill_back();
+            $hdma::set_center(acx, acy, ahofs, avofs);
+            let mut p: u16 = $hdma::begin();
+            p = $hdma::seg_top(p, sky_a);
+            p = $hdma::seg_rows(p, 0, ground_a);
+            p = $hdma::seg_top(p, sky_b);
+            p = $hdma::seg_rows(p, half, ground_b);
+            $hdma::finish(p, true);
+        }
+
+        /// Commits the frame, and the bands and views with it.
+        fn nmi() {
+            let flipped, k = $hdma::commit();
+            if flipped {
+                $bands::show(k);
+                $views::show(k);
+            }
+        }
+
+        /// The top floor's projection; `$fb::to_screen` is the bottom's.
+        fn to_screen(x: M7Coord, y: M7Coord) -> i16, i16, u16 {
+            let sx, sy, size = $fa::to_screen(x, y);
+            return sx, sy, size;
+        }
+
+        fn to_world(sx: i16, sy: i16) -> bool, M7Coord, M7Coord {
+            let on, wx, wy = $fa::to_world(sx, sy);
+            return on, wx, wy;
+        }
+
+        fn sel() -> u8 {
+            return $hdma::sel();
+        }
+
+        fn set_sel(sel: u8) {
+            $hdma::set_sel(sel);
+        }
+    }
+}
+
+/// The default views: up to 4, channels 1 and 7, with `M7HDMA`.
+m7k_views!(M7Views, M7K_VIEWS, M7HDMA, 4, 1, 7);

@@ -1,0 +1,463 @@
+//! mode7kit core: the `Mode7` trait both modes implement, and the pieces
+//! they share.
+//!
+//! A game picks a view by the type it uses: `M7Static` (`static.r65`), one
+//! matrix a frame, or a perspective floor (`M7Floor`, `floor.r65`) or one
+//! of its presets (`Horizon`), one matrix a scanline by HDMA. Each
+//! implements `Mode7`, so a game's loop and sprite code read the same in
+//! any. This file holds no state: the trait, the M7SEL enums, two stateless
+//! register writers, the DMA channel array, the fixed-point multiplies and
+//! the VRAM upload macros. A game rarely includes it by itself.
+//!
+//! ```
+//! include!("mode7kit/static.r65")
+//!
+//! M7Static::setup(M7Repeat::Wrap, M7Flip::None);   // in force blank
+//! loop {
+//!     wait_nmi!();
+//!     M7K_CAMERA.turn(1);
+//!     M7Static::update();
+//!     let sx, sy, size = M7Static::to_screen(enemy_x, enemy_y);
+//! }
+//!
+//! #[interrupt(nmi)]
+//! fn vblank() { M7Static::nmi(); }
+//! ```
+//!
+//! See DESIGN.md for the math and the cost model.
+
+include!("stdlib/sneslib.r65")
+include!("stdlib/math.r65")
+
+// ============================================================================
+// M7SEL
+// ============================================================================
+
+/// What the plane shows beyond its 1024×1024 texels (M7SEL bits 6-7).
+enum M7Repeat {
+    /// The whole 128×128 tilemap repeats forever in every direction.
+    Wrap = 0x00,
+    /// Nothing is drawn outside the map: the backdrop or a lower layer shows.
+    Transparent = 0x80,
+    /// Outside the map, tile 0's pattern repeats and the tilemap does not.
+    Tile0 = 0xC0,
+}
+
+impl M7Repeat {
+    /// True only for `Wrap`: the plane is a torus, so world coordinates
+    /// wrap and every point is on the map.
+    fn wraps(self) -> bool {
+        return self as u8 == 0;
+    }
+}
+
+/// Reflection of the screen (M7SEL bits 0-1). The hardware mirrors the
+/// screen coordinate before the matrix applies: Sx becomes 255 - Sx, Sy
+/// becomes 255 - Sy.
+enum M7Flip {
+    None = 0x00,
+    Horizontal = 0x01,
+    Vertical = 0x02,
+    Both = 0x03,
+}
+
+impl M7Flip {
+    /// True for `Horizontal` and `Both`.
+    fn horizontal(self) -> bool {
+        return self as u8 & 0x01 != 0;
+    }
+
+    /// True for `Vertical` and `Both`.
+    fn vertical(self) -> bool {
+        return self as u8 & 0x02 != 0;
+    }
+
+    /// The reflection with the horizontal axis switched.
+    fn toggle_h(self) -> M7Flip {
+        match self {
+            M7Flip::None => M7Flip::Horizontal,
+            M7Flip::Horizontal => M7Flip::None,
+            M7Flip::Vertical => M7Flip::Both,
+            M7Flip::Both => M7Flip::Vertical,
+        }
+    }
+
+    /// The reflection with the vertical axis switched.
+    fn toggle_v(self) -> M7Flip {
+        match self {
+            M7Flip::None => M7Flip::Vertical,
+            M7Flip::Vertical => M7Flip::None,
+            M7Flip::Horizontal => M7Flip::Both,
+            M7Flip::Both => M7Flip::Horizontal,
+        }
+    }
+}
+
+// ============================================================================
+// WORLD COORDINATES
+// ============================================================================
+
+/// A world coordinate: 10.6 fixed-point texels. `>> 6` is the texel,
+/// `>> 9` the tile. The plane is 1024 texels, exactly 65536 sixty-fourths,
+/// so it wraps by u16 overflow.
+struct M7Coord(u16);
+
+impl M7Coord {
+    /// The coordinate of texel `t`.
+    fn from_texel(t: u16) -> M7Coord {
+        return M7Coord(t << 6);
+    }
+
+    /// The texel, 0..1023.
+    fn texel(self) -> u16 {
+        return (self.0 >> 6) & 0x3FF;
+    }
+
+    /// The tile, 0..127.
+    fn tile(self) -> u8 {
+        return (self.0 >> 9) as u8 & 0x7F;
+    }
+}
+
+// ============================================================================
+// THE TRAIT
+// ============================================================================
+
+/// `to_screen`'s sy for a point that can't be drawn: behind the camera,
+/// past the horizon or below the screen.
+const M7K_HIDDEN: i16 = 0x7FFF;
+
+/// Screen center, the usual pivot.
+const M7_CENTER_X: u8 = 128;
+const M7_CENTER_Y: u8 = 112;
+
+/// A Mode 7 view: one implementor per way of feeding M7A-D. Every method
+/// is an associated function on the implementing type (`M7Static::nmi()`),
+/// dispatched statically; each implementor keeps its own state.
+trait Mode7 {
+    /// BGMODE 7, M7SEL, and the implementor's own hardware. Force blank,
+    /// or vblank when switching modes.
+    fn setup(repeat: M7Repeat, flip: M7Flip);
+
+    /// Leaves this mode: releases what `setup` claimed. Call in vblank,
+    /// straight after `wait_nmi!()`.
+    fn stop() { }
+
+    /// Builds the next frame from `M7Camera` and the type's properties.
+    fn update();
+
+    /// Commits the built frame. Call from the NMI handler.
+    fn nmi();
+
+    /// The screen pixel showing world point (x, y), and the on-screen size
+    /// of one texel there (8.8 pixels). sy is `M7K_HIDDEN` for a point that
+    /// can't be drawn.
+    fn to_screen(x: M7Coord, y: M7Coord) -> i16, i16, u16;
+
+    /// The world point under screen pixel (sx, sy). The `bool` is false off
+    /// the map under a repeat mode that doesn't wrap, or off the plane.
+    fn to_world(sx: i16, sy: i16) -> bool, M7Coord, M7Coord;
+
+    /// The implementor's M7SEL value (`M7Repeat as u8 | M7Flip as u8`),
+    /// for the methods below.
+    fn sel() -> u8;
+    fn set_sel(sel: u8);
+
+    /// Changes what is drawn beyond the map, keeping the reflection.
+    fn set_repeat(repeat: M7Repeat) {
+        Self::set_sel((Self::sel() & 0x03) | repeat as u8);
+    }
+
+    /// Changes the reflection, keeping the repeat mode.
+    fn set_flip(flip: M7Flip) {
+        Self::set_sel((Self::sel() & 0xC0) | flip as u8);
+    }
+
+    /// The current repeat mode.
+    fn repeat() -> M7Repeat {
+        return (Self::sel() & 0xC0) as M7Repeat;
+    }
+
+    /// The current reflection.
+    fn flip() -> M7Flip {
+        return (Self::sel() & 0x03) as M7Flip;
+    }
+}
+
+// ============================================================================
+// REGISTER WRITERS
+// ============================================================================
+
+/// M7A..M7D, write-twice. In vblank.
+fn m7k_write_matrix(a: i16, b: i16, c: i16, d: i16) {
+    let ua: u16 = a as u16;
+    M7A = ua as u8;
+    M7A = (ua >> 8) as u8;
+    let ub: u16 = b as u16;
+    M7B = ub as u8;
+    M7B = (ub >> 8) as u8;
+    let uc: u16 = c as u16;
+    M7C = uc as u8;
+    M7C = (uc >> 8) as u8;
+    let ud: u16 = d as u16;
+    M7D = ud as u8;
+    M7D = (ud >> 8) as u8;
+}
+
+/// M7SEL, the M7X/M7Y center and the BG1 scroll (M7HOFS/M7VOFS). In vblank.
+fn m7k_write_view(sel: u8, cx: u16, cy: u16, hofs: u16, vofs: u16) {
+    M7SEL = sel;
+    M7X = cx as u8;
+    M7X = (cx >> 8) as u8;
+    M7Y = cy as u8;
+    M7Y = (cy >> 8) as u8;
+    BG1HOFS = hofs as u8;
+    BG1HOFS = (hofs >> 8) as u8;
+    BG1VOFS = vofs as u8;
+    BG1VOFS = (vofs >> 8) as u8;
+}
+
+// ============================================================================
+// DMA CHANNELS BY NUMBER
+// ============================================================================
+
+/// One DMA channel's registers, $43n0..$43nF.
+struct M7KChannel {
+    dmap: u8,
+    bbad: u8,
+    a1t: u16,
+    a1b: u8,
+    das: u16,
+    dasb: u8,
+    a2a: u16,
+    ntrl: u8,
+    unused: [u8; 5],
+}
+
+/// The eight channels. A constant index folds to one absolute store
+/// (`M7K_DMA[3].a1t` is $4332), so an instance macro's channel numbers cost
+/// nothing at run time.
+#[hw(0x4300)]
+static mut M7K_DMA: [M7KChannel; 8];
+
+/// The bank of every `#[ram]` static: they are linked under `.BASE $7E`
+/// (pinned by R65's tests/e2e/test_bank_byte_macros.py). Low RAM tables
+/// are bank 0.
+const M7K_RAM_BANK: u8 = 0x7E;
+
+// ============================================================================
+// FIXED-POINT HELPERS
+// ============================================================================
+
+/// Whether v is negative, and |v| as u16.
+fn m7k_abs(v: i16) -> bool, u16 {
+    if v < 0 {
+        return true, (0 - v) as u16;
+    }
+    return false, v as u16;
+}
+
+/// (m · k) >> 8 for m ≤ 256 and any u16 k, saturating at 0x7FFF. Two 8×8
+/// hardware multiplies: the high byte of k times m, plus the carry from
+/// its low byte.
+fn m7k_mul_q8(m: u16, k: u16) -> u16 {
+    if m >= 256 {
+        if k > 0x7FFF { return 0x7FFF; }
+        return k;
+    }
+    let lo: u16 = mul8(m as u8, k as u8) >> 8;
+    let hi: u16 = mul8(m as u8, (k >> 8) as u8);
+    let r: u16 = hi + lo;
+    if r > 0x7FFF { return 0x7FFF; }
+    return r;
+}
+
+/// Signed (m · k) >> 8: m is a sin/cos value (|m| ≤ 256), k an unsigned
+/// 8.8 factor. Saturates at ±0x7FFF.
+fn m7k_smul_q8(m: i16, k: u16) -> i16 {
+    let neg, mag = m7k_abs(m);
+    let r: i16 = m7k_mul_q8(mag, k) as i16;
+    if neg { return 0 - r; }
+    return r;
+}
+
+/// WRMPYA ($4202) and WRMPYB ($4203) as one word: a 16-bit store loads
+/// both bytes and starts the multiply, WRMPYB being written last. The
+/// product is in RDMPY 8 cycles later.
+#[hw(0x4202)]
+static mut M7K_WRMPY: u16;
+
+/// WRMPYB ($4203) as a word: the low byte starts a multiply by the WRMPYA
+/// already there; the high byte lands in WRDIVL ($4204), which starts
+/// nothing.
+#[hw(0x4203)]
+static mut M7K_WRMPYB: u16;
+
+/// Unsigned 16×16 → 32 product, as (high word, low word): up to four 8×8
+/// hardware multiplies, skipping those of a zero high byte.
+fn m7k_umul32(x: u16, y: u16) -> u16, u16 {
+    let xl: u16 = x & 0xFF;
+    let xh: u16 = x >> 8;
+    let yl: u16 = y << 8;            // each factor's byte in WRMPYB's place
+    let yh: u16 = y & 0xFF00;
+    M7K_WRMPY = xl | yl;
+    NOP(4);
+    let ll: u16 = RDMPY;
+    let mut lh: u16 = 0;
+    if yh != 0 {
+        M7K_WRMPY = xl | yh;
+        NOP(4);
+        lh = RDMPY;
+    }
+    let mut hl: u16 = 0;
+    let mut hh: u16 = 0;
+    if xh != 0 {
+        M7K_WRMPY = xh | yl;
+        NOP(4);
+        hl = RDMPY;
+        if yh != 0 {
+            M7K_WRMPY = xh | yh;
+            NOP(4);
+            hh = RDMPY;
+        }
+    }
+    // middle = lh + hl + (ll >> 8), up to 17 bits
+    let mut mid: u16 = lh + (ll >> 8);
+    let mut carry: u16 = 0;
+    if mid < lh { carry = 0x100; }
+    let mid2: u16 = mid + hl;
+    if mid2 < mid { carry = carry + 0x100; }
+    mid = mid2;
+    let lo: u16 = (ll & 0xFF) | (mid << 8);
+    let hi: u16 = hh + (mid >> 8) + carry;
+    return hi, lo;
+}
+
+/// `$out` = (t · d) >> 14 for magnitudes t ≤ 256 (8.8) and d (u16): two
+/// 8×8 products, the second reusing WRMPYA.
+macro_rules! m7k_tprod($t:expr, $d:expr, $out:ident) {
+    if $t < 256 {
+        M7K_WRMPY = $t | ($d << 8);
+        NOP(4);
+        let m7k_lo: u16 = RDMPY;
+        M7K_WRMPYB = $d >> 8;
+        NOP(4);
+        $out = (RDMPY + (m7k_lo >> 8)) >> 6;
+    } else {
+        $out = $d >> 6;
+    }
+}
+
+/// A 10.6 offset (dx, dy) turned into view space by a heading's sin and
+/// cos (8.8), in whole texels: forward = -(s·dx + c·dy) >> 14 and right =
+/// (c·dx - s·dy) >> 14, each product's magnitude truncated, then signed.
+/// Eight hardware multiplies, no calls.
+fn m7k_rotate14(s: i16, c: i16, dx: i16, dy: i16) -> i16, i16 {
+    let sn, sm = m7k_abs(s);
+    let cn, cm = m7k_abs(c);
+    let xn, xm = m7k_abs(dx);
+    let yn, ym = m7k_abs(dy);
+    let mut sx: u16 = 0;
+    let mut sy: u16 = 0;
+    let mut cx: u16 = 0;
+    let mut cy: u16 = 0;
+    m7k_tprod!(sm, xm, sx);
+    m7k_tprod!(sm, ym, sy);
+    m7k_tprod!(cm, xm, cx);
+    m7k_tprod!(cm, ym, cy);
+    let mut psx: i16 = sx as i16;
+    if sn != xn { psx = 0 - psx; }
+    let mut psy: i16 = sy as i16;
+    if sn != yn { psy = 0 - psy; }
+    let mut pcx: i16 = cx as i16;
+    if cn != xn { pcx = 0 - pcx; }
+    let mut pcy: i16 = cy as i16;
+    if cn != yn { pcy = 0 - pcy; }
+    return 0 - psx - pcy, pcx - psy;
+}
+
+/// (a · b) >> 8 for a < 1024 and b < 4096 (a texel offset times an 8.8
+/// size): four 8×8 products, which `m7k_umul32` takes with 32-bit carries
+/// this range can't need.
+fn m7k_mul_shr8(a: u16, b: u16) -> u16 {
+    let bl: u16 = b & 0xFF;
+    let bh: u16 = b >> 8;
+    M7K_WRMPY = (a & 0xFF) | (bl << 8);
+    NOP(4);
+    let ll: u16 = RDMPY;
+    M7K_WRMPYB = bh;
+    NOP(4);
+    let lh: u16 = RDMPY;
+    M7K_WRMPY = (a >> 8) | (bl << 8);
+    NOP(4);
+    let hl: u16 = RDMPY;
+    M7K_WRMPYB = bh;
+    NOP(4);
+    let hh: u16 = RDMPY;
+    return (ll >> 8) + lh + hl + (hh << 8);
+}
+
+/// Signed i16 × i16, returned as bits 8..23 of the 32-bit product: a value
+/// times an 8.8 factor.
+fn m7k_smul_shr8(x: i16, y: i16) -> i16 {
+    let xn, xm = m7k_abs(x);
+    let yn, ym = m7k_abs(y);
+    let hi, lo = m7k_umul32(xm, ym);
+    let r: i16 = ((hi << 8) | (lo >> 8)) as i16;
+    if xn != yn { return 0 - r; }
+    return r;
+}
+
+/// Signed i16 × i16, returned as bits 14..29 of the 32-bit product: the
+/// `>> 14` that turns 8.8 × 10.6 into whole pixels.
+fn m7k_smul_shr14(x: i16, y: i16) -> i16 {
+    let xn, xm = m7k_abs(x);
+    let yn, ym = m7k_abs(y);
+    let hi, lo = m7k_umul32(xm, ym);
+    let r: i16 = ((hi << 2) | (lo >> 14)) as i16;
+    if xn != yn { return 0 - r; }
+    return r;
+}
+
+/// Signed i16 × i16, returned as bits 2..17 of the 32-bit product: 8.8 ×
+/// pixels turned into 10.6 texels.
+fn m7k_smul_shr2(x: i16, y: i16) -> i16 {
+    let xn, xm = m7k_abs(x);
+    let yn, ym = m7k_abs(y);
+    let hi, lo = m7k_umul32(xm, ym);
+    let r: i16 = ((hi << 14) | (lo >> 2)) as i16;
+    if xn != yn { return 0 - r; }
+    return r;
+}
+
+// ============================================================================
+// VRAM UPLOAD
+// ============================================================================
+
+const M7K_VRAM0: u16 = 0;
+
+/// Copies 32 KB of interleaved Mode 7 data (map in even bytes, chr in odd
+/// bytes: an `.md7` file) to VRAM word 0 on DMA channel 0. Force blank.
+macro_rules! mode7_upload_interleaved($data:ident) {
+    dma_copy_vram_const!(0, $data, M7K_VRAM0, 32768);
+}
+
+/// Copies a 16 KB tilemap (128×128 tile numbers) to the low VRAM bytes and
+/// 16 KB of chr (256 tiles × 64 bytes) to the high ones, on DMA channel 0.
+/// Force blank.
+macro_rules! mode7_upload_split($map:ident, $chr:ident) {
+    VMAIN = 0x00;
+    VMADD = 0;
+    STATUS.A16 = false;   // dma_set_src! is m8 asm
+    dma_set_src!(0, $map);
+    dma_set_size!(0, 16384);
+    dma_set_ppu_dest!(0, 0, 24);
+    dma_trigger!(0);
+    VMAIN = 0x80;
+    VMADD = 0;
+    STATUS.A16 = false;   // dma_set_src! is m8 asm
+    dma_set_src!(0, $chr);
+    dma_set_size!(0, 16384);
+    dma_set_ppu_dest!(0, 0, 25);
+    dma_trigger!(0);
+}
