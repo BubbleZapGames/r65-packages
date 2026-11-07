@@ -8,4 +8,4 @@ cfg         = ["snes"]
 include_dir = "."
 
 [dependencies]
-stdlib = { git = "https://github.com/BubbleZapGames/R65", version = "0.1" }
+stdlib = { version = "0.1" }

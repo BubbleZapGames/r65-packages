@@ -7,5 +7,5 @@ main = "src/main.r65"
 cfg  = ["snes"]
 
 [dependencies]
-stdlib     = { git = "https://github.com/BubbleZapGames/R65", version = "0.1" }
+stdlib     = { version = "0.1" }
 uncompress = { path = ".." }

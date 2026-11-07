@@ -5,8 +5,3 @@ version = 1
 name    = "nscene"
 version = "0.1.0"
 source  = "path+.."
-
-[[package]]
-name    = "stdlib"
-version = "0.1.0"
-source  = "git+https://github.com/BubbleZapGames/R65?tag=stdlib-v0.1.0"
