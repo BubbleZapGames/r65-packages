@@ -1123,10 +1123,11 @@ These are things the port fixes rather than copies:
 
 ## Example ROMs and tests
 
-`examples/` holds three ROMs, each shaped like `nscene/example`, with
-`mode7kit = { path = "../.." }`, a README and Mesen-GDB pytest tests. They
-use dizworld's assets (copied from `r65docs/static/examples/assets/`, CC BY;
-each README carries the attribution) and draw no sprites.
+`examples/` holds four ROMs, each shaped like `nscene/example`, with
+`mode7kit = { path = "../.." }`, a README and Mesen-GDB pytest tests. The
+first three use dizworld's assets (copied from
+`r65docs/static/examples/assets/`, CC BY; each README carries the
+attribution) and draw no sprites.
 
 - **`examples/topdown/`** includes `static.r65`. The D-pad moves along and
   across the heading (`M7K_CAMERA.forward` / `strafe`), L/R turn, A/X zoom
@@ -1138,6 +1139,12 @@ each README carries the attribution) and draw no sprites.
 - **`examples/split/`** includes `views.r65`: a second camera and floor
   instance, four bands without COLDATA, and `m7k_split!`. Pad 1's D-pad
   drives the top camera, Y/A/X/B the bottom one.
+- **`examples/beachball/`** includes `static.r65` for one object rather than
+  a view: a beach ball, converted from a BMP by `r65x bmp2chr -m7` in the
+  Makefile, spins and squashes over a sprite floor built from the r65docs
+  platformer's tiles. Past the ball's edge is transparent, over a COLDATA
+  sky gradient. Its design is in
+  [its own DESIGN.md](examples/beachball/DESIGN.md).
 
 `tests/` holds three test ROMs:
 

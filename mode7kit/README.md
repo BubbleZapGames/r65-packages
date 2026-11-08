@@ -112,7 +112,8 @@ loop {
 ```
 
 `examples/topdown/`, `examples/flyer/` and `examples/split/` are ROMs for
-each, with tests that drive them.
+each, with tests that drive them. `examples/beachball/` uses Static mode for
+a single object: a spinning, squashing ball over a sprite floor.
 
 ## Units
 

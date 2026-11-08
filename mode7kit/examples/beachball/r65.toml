@@ -1,0 +1,11 @@
+[package]
+name    = "beachball"
+version = "0.1.0"
+
+[bin]
+main = "src/main.r65"
+cfg  = ["snes"]
+
+[dependencies]
+stdlib = { version = "0.1" }
+mode7kit = { path = "../.." }

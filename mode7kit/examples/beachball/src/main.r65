@@ -1,0 +1,365 @@
+//! mode7kit beach ball example: `M7Static` spinning and squashing one object.
+//!
+//! The ball is the whole Mode 7 layer: a 64-pixel disc in the map's corner,
+//! converted from assets/ball.bmp by `r65x bmp2chr` (see the Makefile),
+//! rotated for the spin and scaled on the screen axes for the squash, with
+//! everything past its edge transparent. The floor is sprites in front of
+//! it, built from the r65docs platformer's grass and dirt tiles; the sky is
+//! the backdrop, brightened towards the floor by colour math on an HDMA
+//! COLDATA gradient. See DESIGN.md.
+//!
+//! A kicks the ball up, the D-pad pushes it, Start pauses. The tests pause
+//! the ball and write its state into `BALL`.
+
+#[snesrom(name="MODE7KIT BEACHBALL", hirom, fastrom)]
+
+#[stack(0x0100, 0x01FF)]
+
+include!("stdlib/65816.r65")
+include!("stdlib/sneslib.r65")
+include!("stdlib/Q10.r65")
+include!("mode7kit/static.r65")
+
+#[bank(0)]
+
+// ============================================================================
+// LAYOUT
+// ============================================================================
+
+/// The floor's top line: the ball's lowest pixel is the line above it.
+const FLOOR: u16 = 176;
+/// The ball's radius on screen at zoom 64, and its centre texel.
+const RADIUS: u16 = 32;
+const CENTER: u16 = 32;
+/// Where the floor's 16x16 sprite tiles go: word $6000, OBJSEL base 3.
+const VRAM_OBJ: u16 = 0x6000;
+/// OAM attribute of a floor sprite: palette 0, in front of BG1.
+const FLOOR_ATTR: u8 = 0x30;
+/// The sprite size the floor uses, and the sprites past it: off screen.
+const OAM_BYTES: u16 = 544;
+const HIDDEN_Y: u8 = 240;
+
+// ============================================================================
+// MOTION (Q10.6: pixels, pixels a frame, in 1/64ths)
+// ============================================================================
+
+const GRAVITY: Q10 = 12;                      // 0.1875
+const KICK: Q10 = -384;                       // -6.0
+/// A bounce never launches slower than this, so the ball never settles.
+const MIN_BOUNCE: Q10 = 256;                  // 4.0
+const PUSH: Q10 = 4;                          // 0.0625
+const MAX_VX: Q10 = 192;                      // 3.0
+/// The ball's centre while it rests on the floor unsquashed.
+const REST_Y: Q10 = ((FLOOR - RADIUS) << 6) as i16;
+const LEFT_X: Q10 = (RADIUS << 6) as i16;
+const RIGHT_X: Q10 = ((256 - RADIUS) << 6) as i16;
+const SQUASH_FRAMES: u8 = 6;
+
+/// The squash, by frames left - 1: how far the vertical zoom drops below
+/// 64 and the horizontal rises above it.
+static SQUASH_Y: [u8; 6] = [4, 10, 16, 16, 10, 4];
+static SQUASH_X: [u8; 6] = [3, 7, 12, 12, 7, 3];
+
+/// The ball, where the tests write it: the centre pixel and the speed
+/// (signed, so above the top of the screen is negative), the spin (8.8 of a
+/// 256-step turn), the zoom per screen axis (64 = 1.0×), the squash frames
+/// left and the landing speed it bounces back with.
+struct Ball {
+    x: Q10,
+    y: Q10,
+    vx: Q10,
+    vy: Q10,
+    angle: u16,
+    zx: u8,
+    zy: u8,
+    squash: u8,
+    impact: Q10,
+    paused: u8,
+}
+
+#[lowram]
+static mut BALL: Ball = Ball {
+    x: 128 << 6, y: 48 << 6, vx: 96, vy: 0, angle: 0,
+    zx: 64, zy: 64, squash: 0, impact: 0, paused: 0,
+};
+
+struct Game {
+    frames: u16,
+    pad: u16,
+    pad_prev: u16,
+}
+
+#[lowram]
+static mut GAME: Game = Game { frames: 0, pad: 0, pad_prev: 0 };
+
+// ============================================================================
+// THE SKY: COLDATA every 8 lines, brighter towards the floor
+// ============================================================================
+
+const SKY_STEPS: u16 = 28;
+
+const fn sky_table() -> [u8; 57] {
+    let mut t: [u8; 57] = [0; 57];
+    let mut i: u16 = 0;
+    while i < SKY_STEPS {
+        t[i * 2] = 8;                              // 8 lines, then the next
+        t[i * 2 + 1] = 0xE0 | (i / 2) as u8;       // R, G and B: intensity i/2
+        i++;
+    }
+    return t;
+}
+
+/// The gradient's HDMA table, in low RAM so the channel's bank is 0.
+#[lowram]
+static mut SKY_HDMA: [u8; 57] = sky_table();
+
+// ============================================================================
+// THE BALL: 64 tiles from bmp2chr, placed by the map
+// ============================================================================
+
+/// The ball's tiles: ball.bmp's 8x8 blocks in reading order, 8 a row.
+const BALL_TILES: u16 = 8;
+
+/// The 128x128 map: the ball's tiles in its top-left 8x8 corner, tile 0
+/// everywhere else. Tile 0 is the bitmap's own top-left block, which lies
+/// past the disc's edge, so it is blank.
+const fn ball_map() -> [u8; 16384] {
+    let mut t: [u8; 16384] = [0; 16384];
+    let mut ty: u16 = 0;
+    while ty < BALL_TILES {
+        let mut tx: u16 = 0;
+        while tx < BALL_TILES {
+            t[ty * 128 + tx] = (ty * BALL_TILES + tx) as u8;
+            tx++;
+        }
+        ty++;
+    }
+    return t;
+}
+
+/// Uploads the map to the low VRAM bytes and the ball's 64 tiles to the
+/// high ones, on DMA channel 0. Force blank.
+fn upload_ball() {
+    VMAIN = 0x00;                         // step after the low byte
+    VMADD = 0;
+    STATUS.A16 = false;                   // dma_set_src! is m8 asm
+    dma_set_src!(0, BALL_MAP);
+    dma_set_size!(0, 16384);
+    dma_set_ppu_dest!(0, 0, 24);          // VMDATAL
+    dma_trigger!(0);
+    VMAIN = 0x80;                         // step after the high byte
+    VMADD = 0;
+    STATUS.A16 = false;
+    dma_set_src!(0, BALL_CHR_DATA);
+    dma_set_size!(0, 4096);
+    dma_set_ppu_dest!(0, 0, 25);          // VMDATAH
+    dma_trigger!(0);
+}
+
+// ============================================================================
+// THE FLOOR: 16 x 3 sprites, grass over two rows of dirt
+// ============================================================================
+
+const fn floor_oam() -> [u8; 544] {
+    let mut t: [u8; 544] = [0; 544];
+    let mut i: u16 = 0;
+    while i < 128 {
+        t[i * 4 + 1] = HIDDEN_Y;
+        i++;
+    }
+    let mut n: u16 = 0;
+    while n < 48 {
+        let row: u16 = n / 16;
+        let col: u16 = n % 16;
+        t[n * 4] = (col * 16) as u8;
+        t[n * 4 + 1] = (FLOOR + row * 16) as u8;
+        if row == 0 {
+            t[n * 4 + 2] = 0;                           // grass block
+        } else {
+            t[n * 4 + 2] = 2;                           // dirt block
+        }
+        t[n * 4 + 3] = FLOOR_ATTR;
+        n++;
+    }
+    return t;                                           // high table: all zero, small, x < 256
+}
+
+/// The platformer's 8x8 tiles each OBJ tile slot takes: the grass block
+/// (row 22 over row 23 of its map) at 0, 1, 16, 17 and dirt at 2, 3, 18, 19,
+/// the layout a 16x16 sprite reads.
+static FLOOR_TILES: [u8; 8] = [0x0B, 0x25, 0x2A, 0x2B, 0x22, 0x22, 0x22, 0x22];
+static FLOOR_SLOTS: [u8; 8] = [0, 1, 16, 17, 2, 3, 18, 19];
+
+/// Copies the floor's tiles into OBJ VRAM. Force blank.
+fn upload_floor_tiles() {
+    VMAIN = 0x80;
+    let mut k: u16 = 0;
+    while k < 8 {
+        VMADD = VRAM_OBJ + (FLOOR_SLOTS[k] as u16) * 16;
+        let src: u16 = (FLOOR_TILES[k] as u16) * 32;
+        let mut i: u16 = 0;
+        while i < 32 {
+            VMDATA = FLOOR_CHR[src + i] as u16 | (FLOOR_CHR[src + i + 1] as u16) << 8;
+            i = i + 2;
+        }
+        k++;
+    }
+}
+
+// ============================================================================
+// UPDATE
+// ============================================================================
+
+fn held(button: u16) -> bool {
+    return GAME.pad & button != 0;
+}
+
+fn pressed(button: u16) -> bool {
+    return GAME.pad & ~GAME.pad_prev & button != 0;
+}
+
+/// The pad: push, kick, pause.
+fn controls() {
+    if pressed(JOY_START) {
+        BALL.paused = BALL.paused ^ 1;
+    }
+    if BALL.paused != 0 {
+        return;
+    }
+    if held(JOY_RIGHT) && BALL.vx < MAX_VX { BALL.vx = BALL.vx + PUSH; }
+    if held(JOY_LEFT) && BALL.vx > 0 - MAX_VX { BALL.vx = BALL.vx - PUSH; }
+    if pressed(JOY_A) && BALL.squash == 0 {
+        BALL.vy = KICK;
+    }
+}
+
+/// One frame of motion: fall or squash, roll, bounce off the sides.
+fn step() {
+    if BALL.squash == 0 {
+        BALL.vy = BALL.vy + GRAVITY;
+        BALL.y = BALL.y + BALL.vy;
+        if BALL.vy > 0 && BALL.y >= REST_Y {
+            BALL.y = REST_Y;
+            BALL.impact = BALL.vy;
+            BALL.squash = SQUASH_FRAMES;
+        }
+    } else {
+        BALL.squash = BALL.squash - 1;
+        if BALL.squash == 0 {
+            let back: Q10 = BALL.impact - (BALL.impact >> 3);   // 7/8 of the landing speed
+            if back < MIN_BOUNCE {
+                BALL.vy = 0 - MIN_BOUNCE;
+            } else {
+                BALL.vy = 0 - back;
+            }
+        }
+    }
+    if BALL.squash != 0 {
+        let i: u16 = (BALL.squash - 1) as u16;
+        BALL.zy = 64 - SQUASH_Y[i];
+        BALL.zx = 64 + SQUASH_X[i];
+        BALL.y = Q10::from_int((FLOOR - (BALL.zy >> 1) as u16) as i16);   // the bottom stays on the floor
+    } else {
+        BALL.zy = 64;
+        BALL.zx = 64;
+    }
+
+    BALL.x = BALL.x + BALL.vx;
+    if BALL.vx < 0 && BALL.x < LEFT_X {
+        BALL.x = LEFT_X;
+        BALL.vx = 0 - BALL.vx;
+    }
+    if BALL.vx > 0 && BALL.x > RIGHT_X {
+        BALL.x = RIGHT_X;
+        BALL.vx = 0 - BALL.vx;
+    }
+    // Rolling: a turn (256 steps) per circumference (2πr ≈ 201 pixels), so
+    // the angle moves 1.25 steps a pixel: 5 of its 1/256ths per 1/64 pixel.
+    let v: i16 = BALL.vx.0;
+    BALL.angle = BALL.angle + ((v << 2) + v) as u16;
+}
+
+/// The ball's matrix: spin, then the squash on the screen axes, with the
+/// centre texel on the ball's pixel.
+fn place() {
+    let bx: u16 = BALL.x.to_int() as u16;
+    let by: u16 = BALL.y.to_int() as u16;
+    M7Static::rotate_scale((BALL.angle >> 8) as u8, BALL.zx, BALL.zy);
+    M7Static::set_center(CENTER, CENTER, CENTER - bx, CENTER - by);
+    M7Static::set_pivot(bx as u8, by as u8);
+}
+
+fn update() {
+    controls();
+    if BALL.paused == 0 {
+        step();
+    }
+    place();
+}
+
+// ============================================================================
+// NMI
+// ============================================================================
+
+#[interrupt(nmi)]
+fn nmi_handler() {
+    clear_nmi!();
+    M7Static::nmi();
+    INIDISP = 0x0F;
+    GAME.frames++;
+}
+
+// ============================================================================
+// ENTRY
+// ============================================================================
+
+#[entry]
+fn main() -> ! {
+    snes_init();
+    INIDISP = 0x80;
+    NMITIMEN = 0;
+
+    // The ball: Mode 7 data, and its colours 0-9. Colour 0, the bitmap's
+    // transparent index, is the sky: the backdrop.
+    upload_ball();
+    dma_copy_cgram_const!(0, BALL_PAL_DATA, 0, 10);
+    // The floor: sprite tiles, OBJ palette 0 and the OAM image
+    upload_floor_tiles();
+    dma_copy_cgram_const!(0, FLOOR_PAL_DATA, 128, 16);
+    dma_copy_oam_const!(0, FLOOR_OAM, 544);
+    set_obj_sel!(ObjSize::T16x16_32x32, 3, 0);
+    // The sky's gradient: colour math on the backdrop
+    CGWSEL = 0x00;                        // colour math everywhere, fixed colour addend
+    CGADSUB = 0x20;                       // add, on the backdrop only
+    M7K_DMA[1].dmap = 0x00;               // direct, one register
+    M7K_DMA[1].bbad = 0x32;               // COLDATA
+    M7K_DMA[1].a1t = &SKY_HDMA as u16;
+    M7K_DMA[1].a1b = 0x00;                // low RAM
+    HDMAEN = 0x02;
+
+    M7Static::setup(M7Repeat::Transparent, M7Flip::None);
+    TM = 0x11;                            // BG1 and sprites
+    place();
+    NMITIMEN = Interrupt::Nmi as u8 | Interrupt::AutoJoy as u8;
+
+    loop {
+        wait_nmi!();
+        wait_autojoy!();
+        GAME.pad_prev = GAME.pad;
+        GAME.pad = (JOY1H as u16) << 8 | JOY1L as u16;
+        update();
+    }
+}
+
+// ============================================================================
+// ASSETS
+// ============================================================================
+
+#[bank(1)]
+static FLOOR_OAM: [u8; 544] = floor_oam();
+static BALL_MAP: [u8; 16384] = ball_map();
+// Built from assets/ball.bmp by the Makefile (r65x bmp2chr -m7 -p)
+static BALL_CHR_DATA = include_bytes!("../build/ball.chr");
+static BALL_PAL_DATA = include_bytes!("../build/ball.pal");
+static FLOOR_CHR = include_bytes!("../assets/platform.chr");
+static FLOOR_PAL_DATA = include_bytes!("../assets/platform.pal");
