@@ -1,8 +1,8 @@
 //! mode7kit plane rotation: a perspective plane at a true pitch angle, one
 //! matrix a scanline.
 //!
-//! Includes `core.r65`, whose `M7K_ZRECIP` it reads. Adds no table of its
-//! own.
+//! Includes `hdma.r65`, the default transport it builds into, and with it
+//! `core.r65`, whose `M7K_ZRECIP` it reads. Adds no table of its own.
 //!
 //! `m7k_plane_rotation!` writes a view type implementing `Mode7Scan`, and
 //! so `Mode7`, like `m7k_plain!`'s. It differs in the pitch: it reads the
@@ -14,7 +14,7 @@
 //! over `M7HDMA`, the whole screen.
 //!
 //! ```
-//! include!("mode7kit/plane_rotation.r65")
+//! include!("mode7kit/plain_rotation.r65")
 //!
 //! M7PlaneRotation::setup(M7Repeat::Wrap, M7Flip::None);    // force blank
 //! loop {
@@ -31,7 +31,7 @@
 //! The row builder drives the hardware multiplier directly: an NMI
 //! handler running mid-frame must not use it (`mul8`, `div16`...).
 
-include!("mode7kit/core.r65")
+include!("mode7kit/hdma.r65")
 
 /// The pitch range the plane takes. Below 6 (8.4°) the point under the
 /// camera, the matrix pivot, is more than 1023 lines below the screen's

@@ -39,25 +39,28 @@ R65. The README is the user guide.
 ## Files and layers
 
 ```
-core.r65 ◄─┬─ static.r65             M7Static
- (tables,  ├─ plain.r65              M7HDMA ◄ M7Plain
-  M7HDMA)  └─ plane_rotation.r65     M7HDMA ◄ M7PlaneRotation
+core.r65 ◄─┬─ static.r65                         M7Static
+ (traits,  │
+  tables)  └─ hdma.r65 ◄─┬─ plain.r65            M7HDMA ◄ M7Plain
+             (m7k_hdma!, └─ plain_rotation.r65   M7HDMA ◄ M7PlaneRotation
+              M7HDMA)
 ```
 
 | Layer | File | Writes | Default instance | `Mode7`? | ROM | RAM |
 |---|---|---|---|---|---|---|
 | core | `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Repeat`, `M7Flip`, `m7k_sin/cos`, `m7k_heading`, `m7k_recip`, `M7Camera`, register writers, the DMA channel array, the multiplies, uploads | `M7K_CAMERA` | | 640 B (sin/cos), 512 B (reciprocal), 2321 B (`M7K_ZRECIP`, for a per-line view) | 7 B a camera |
 | flat view | `static.r65` | `M7Static` | `M7K_STATIC` | yes | code | 31 B |
-| transport | `core.r65` | `m7k_hdma!`: per-line matrices, double buffer, indirect tables, M7SEL and the view, HDMAEN | `M7HDMA` (224 lines, ch 2–3) | no | code | 16·lines + 151 B |
+| transport | `hdma.r65` | `m7k_hdma!`: per-line matrices, double buffer, indirect tables, M7SEL and the view, HDMAEN; the HDMA table writers | `M7HDMA` (224 lines, ch 2–3) | no | code | 16·lines + 151 B an instance (3735 B for `M7HDMA`) |
 | floor | `plain.r65` | `m7k_plain!`: a camera's perspective floor in a transport, its projections | `M7Plain` | yes, and `Mode7Scan` | 640 B | 941 B |
-| plane | `plane_rotation.r65` | `m7k_plane_rotation!`: the plane at a true pitch angle, its projections | `M7PlaneRotation` | yes, and `Mode7Scan` | none | 947 B |
+| plane | `plain_rotation.r65` | `m7k_plane_rotation!`: the plane at a true pitch angle, its projections | `M7PlaneRotation` | yes, and `Mode7Scan` | none | 947 B |
 
 A game includes the file of the view it uses:
 
 ```rust
 include!("mode7kit/static.r65")       // M7Static, the camera, the tables it uses
 include!("mode7kit/plain.r65")        // M7Plain over M7HDMA
-include!("mode7kit/plane_rotation.r65") // M7PlaneRotation over M7HDMA
+include!("mode7kit/plain_rotation.r65") // M7PlaneRotation over M7HDMA
+include!("mode7kit/hdma.r65")         // M7HDMA alone, for a game's own effect
 ```
 
 The transport has no math and is not a `Mode7`: a custom per-line effect
@@ -85,11 +88,14 @@ included.
 
 R65 has no generics. Each HDMA layer is therefore a macro that writes a
 type, its impls and its state static, the nscene pattern
-(`scene_fade_in!(Name, length)`). The file ends with its default instance:
+(`scene_fade_in!(Name, length)`). The default instances are each in the
+file of the layer that uses them:
 
 ```rust
-m7k_hdma!(M7HDMA, M7K_HDMA, 224, 2, 3);
-m7k_plain!(M7Plain, M7K_PLAIN, M7HDMA, M7K_HDMA, m7k_rows_mul);
+m7k_hdma!(M7HDMA, M7K_HDMA, 224, 2, 3);                                  // hdma.r65
+m7k_plain!(M7Plain, M7K_PLAIN, M7HDMA, M7K_HDMA, m7k_rows_mul);          // plain.r65
+m7k_plane_rotation!(M7PlaneRotation, M7K_PLANE_ROTATION, M7HDMA, M7K_HDMA,
+                    m7k_plane_rows_mul);                                 // plain_rotation.r65
 ```
 
 | Macro | Parameters |
@@ -529,11 +535,16 @@ done by sign and magnitude through `mul16_wide`. The
 results aren't clipped: a point off screen just has coordinates outside
 0..255 / 0..223, and the game decides whether to draw it.
 
-## core.r65: the transport
+## hdma.r65: the transport
 
 `m7k_hdma!` writes the transport: one Mode 7 matrix a scanline by indirect
-HDMA, double-buffered, with no math. A floor or a custom effect fills its
-rows; `commit()` shows them. It writes HDMAEN, from a shadow other layers
+HDMA, double-buffered, with no math. A per-line view or a custom effect
+fills its rows; `commit()` shows them. `hdma.r65` holds the macro, the
+HDMA table writers it uses, and the default instance `M7HDMA`, which the
+per-line views include; `core.r65` has none of it, so a Static-only game
+never sees it. Include-once keeps `M7HDMA` single when both views are in
+one ROM: their files can't each invoke the macro, or it would be declared
+twice. It writes HDMAEN, from a shadow other layers
 add their channels to, and M7SEL and the view (M7X/M7Y, BG1HOFS/VOFS)
 with each frame it shows.
 
@@ -855,7 +866,7 @@ unpitched floor moved p lines. This is the look-up/look-down of Doom-era
 engines. It is close for small angles, and it inherits the A = D
 approximation the floor already makes. An exact pitched camera needs
 A ≠ D, 4 multiplies a row instead of 2: that is
-[`M7PlaneRotation`](#plane_rotationr65-m7planerotation-a-plane-at-a-true-pitch),
+[`M7PlaneRotation`](#plain_rotationr65-m7planerotation-a-plane-at-a-true-pitch),
 a second view rather than a mode of this one.
 
 **No extra work per line.** Line l counts down from the horizon, so
@@ -970,7 +981,7 @@ together.
 Cost: 13 scanlines per visible object, 8 behind the camera, 4 culled (see
 [Cycle budget](#cycle-budget)).
 
-## plane_rotation.r65: `M7PlaneRotation`, a plane at a true pitch
+## plain_rotation.r65: `M7PlaneRotation`, a plane at a true pitch
 
 `M7Plain`'s pitch is a horizon shift: its ground perspective depends only
 on the height, so tilting slides the picture, and it can't look straight
@@ -1212,7 +1223,7 @@ attribution) and draw no sprites.
 - **`examples/split/`** includes `plain.r65`: a second camera and floor
   instance, with its own bands, views and `m7k_split!` in `src/` (see its
   README). Pad 1's D-pad drives the top camera, Y/A/X/B the bottom one.
-- **`examples/plane/`** includes `plane_rotation.r65`: the flyer with
+- **`examples/plane/`** includes `plain_rotation.r65`: the flyer with
   `M7PlaneRotation` for the view, under the flyer's sky (its own copy in
   `src/`). X/B tilt from 8° to straight down. Its tests check the line
   tables and rows against the formulas, the held row straight down, the
@@ -1285,7 +1296,7 @@ themselves against the formulas.
   instead of 2. `M7Plain` keeps dizworld's A = D approximation;
   `M7PlaneRotation` pays for A ≠ D.
 - **Exact pitch below 8°.** The floor's [pitch](#pitch) is a y-shear;
-  [`M7PlaneRotation`](#plane_rotationr65-m7planerotation-a-plane-at-a-true-pitch)
+  [`M7PlaneRotation`](#plain_rotationr65-m7planerotation-a-plane-at-a-true-pitch)
   is the exact view, from 8.4° to straight down. Level and upward views
   need a pivot other than the point under the camera.
 - **The plane's cost.** Turning at 45° (275 lines) and a pitch change
@@ -1313,7 +1324,7 @@ themselves against the formulas.
 
 - `#[bank(auto)]` is a directive, not an item attribute, and auto-bank ROM
   statics must be `far static`. `M7K_ZRECIP` sits at the end of
-  `core.r65` for that reason, after the default transport.
+  `core.r65` for that reason, after everything else in the file.
 - `&$state.abi as u16` gives a field's 16-bit address for A1Tn. R65 has
   no bank-byte operator, so the `#[ram]` bank is the constant
   `M7K_RAM_BANK`, which R65's own tests pin.

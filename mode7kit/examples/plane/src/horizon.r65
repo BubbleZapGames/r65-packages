@@ -36,7 +36,7 @@
 //! }
 //! ```
 
-include!("mode7kit/plane_rotation.r65")
+include!("mode7kit/plain_rotation.r65")
 include!("bands.r65")
 
 /// `$name`, the background for floor `$floor` (any `Mode7Scan`) with bands

@@ -17,7 +17,7 @@ trait, so a game's loop and sprite code read the same in any:
   HDMA register, so HDMAEN stays yours.
 - **`M7Plain`** (`plain.r65`): a Mode Y perspective floor, one matrix a
   scanline by HDMA, that tilts up and down by sliding its picture.
-- **`M7PlaneRotation`** (`plane_rotation.r65`): the perspective plane at a
+- **`M7PlaneRotation`** (`plain_rotation.r65`): the perspective plane at a
   true pitch angle, from about 8° down to straight down. Its
   foreshortening changes with the tilt as a real camera's does. It costs
   more than the floor to turn, except straight down, where every line
@@ -53,8 +53,9 @@ Tables build at compile time.
 |---|---|---|---|
 | `static.r65` | `M7Static` | sin/cos, reciprocal (1.2 KB) | 38 B |
 | `plain.r65` | `M7Plain`, the perspective floor (a `Mode7Scan`) | + depth scale (2.3 KB) and per-height tables (640 B) | + 0.9 KB |
-| `plane_rotation.r65` | `M7PlaneRotation`, the plane at a true pitch (a `Mode7Scan`) | + depth scale (2.3 KB) | + 0.9 KB |
-| `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Camera` and the world-coordinate helpers, the sin/cos and zoom reciprocal tables, the M7SEL enums, VRAM upload macros; `M7HDMA`, the per-line matrices, for your own effects, HDMA channels 2–3 | sin/cos (640 B), reciprocal (512 B) | 7 B a camera; 3.7 KB (16 B a line) once `M7HDMA` is used |
+| `plain_rotation.r65` | `M7PlaneRotation`, the plane at a true pitch (a `Mode7Scan`) | + depth scale (2.3 KB) | + 0.9 KB |
+| `hdma.r65` | the transport macro `m7k_hdma!` and `M7HDMA`, the per-line views' transport, for your own effects, HDMA channels 2–3 | none | + 3.7 KB (16 B a line) |
+| `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Camera` and the world-coordinate helpers, the sin/cos and zoom reciprocal tables, the M7SEL enums, VRAM upload macros | sin/cos (640 B), reciprocal (512 B) | 7 B a camera |
 
 ## Quick start
 
@@ -120,7 +121,7 @@ A true pitch is `M7PlaneRotation` in place of `M7Plain`, with the same
 calls; the camera's pitch is then an angle, 6..64 (64 straight down):
 
 ```rust
-include!("mode7kit/plane_rotation.r65")
+include!("mode7kit/plain_rotation.r65")
 // ...
 M7K_CAMERA.tilt(1);                      // look a step further down
 M7PlaneRotation::update();
@@ -195,8 +196,8 @@ for a return to Static mode.
 
 ## Your own per-line effect
 
-`M7HDMA` is the floor's transport: per-line matrices, double-buffered,
-with no math. Write rows into the back buffer with
+`M7HDMA` (`include!("mode7kit/hdma.r65")`) is the per-line views'
+transport: per-line matrices, double-buffered, with no math. Write rows into the back buffer with
 `M7HDMA::set_line(row, a, b, c, d)`, set the view with `set_center`, and
 finish with `M7HDMA::publish(top, rows)`: lines above `top` hold
 `set_top`'s matrix, line `top + r` reads row r, and after `rows` lines the

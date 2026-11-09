@@ -1,7 +1,8 @@
 //! mode7kit floor: a Mode Y perspective floor, one matrix a scanline.
 //!
-//! Includes `core.r65`, whose `M7K_ZRECIP` it reads. Adds the per-height
-//! tables `M7K_ROW_*` (640 bytes). The floor's math is dizworld's (Brad
+//! Includes `hdma.r65`, the default transport it builds into, and with it
+//! `core.r65`, whose `M7K_ZRECIP` it reads. Adds the per-height tables
+//! `M7K_ROW_*` (640 bytes). The floor's math is dizworld's (Brad
 //! Smith), with its divisions moved to compile time.
 //!
 //! `m7k_plain!` writes a floor type implementing `Mode7Scan` (`core.r65`),
@@ -29,7 +30,7 @@
 //! The row builder drives the hardware multiplier directly: an NMI
 //! handler running mid-frame must not use it (`mul8`, `div16`...).
 
-include!("mode7kit/core.r65")
+include!("mode7kit/hdma.r65")
 
 // ============================================================================
 // COMPILE-TIME TABLES
