@@ -3,7 +3,7 @@
 //!
 //! A game picks a view by the type it uses: `M7Static` (`static.r65`), one
 //! matrix a frame; or, one matrix a scanline by HDMA, the perspective
-//! floor `M7Plain` (`plain.r65`) or the true-pitch plane `M7PlaneRotation`
+//! floor `M7Plain` (`plain.r65`) or the true-pitch plain `M7PlainRotation`
 //! (`plain_rotation.r65`). Each implements `Mode7`, so a game's loop and
 //! sprite code read the same in any.
 //!
@@ -11,8 +11,8 @@
 //! - the `Mode7` trait, and `Mode7Scan`, the per-line views' trait, with
 //!   the macros the per-line views share their bodies through;
 //! - the M7SEL enums, the world coordinate `M7Coord` and its helpers;
-//! - the camera, `M7Camera`, and `M7K_CAMERA`, the one every view follows
-//!   until its `set_camera`;
+//! - the camera type, `M7Camera`. The game declares its cameras and hands
+//!   one to each view's `setup`;
 //! - the tables: sin/cos (640 B), the zoom reciprocal (512 B) and the
 //!   per-line views' depth scale (2321 B), each dropped when unused;
 //! - two stateless register writers, the DMA channel array, the
@@ -26,10 +26,15 @@
 //! ```
 //! include!("mode7kit/static.r65")
 //!
-//! M7Static::setup(M7Repeat::Wrap, M7Flip::None);   // in force blank
+//! #[lowram]
+//! static mut CAMERA: M7Camera = M7Camera {
+//!     x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0,
+//! };
+//!
+//! M7Static::setup(&CAMERA, M7Repeat::Wrap, M7Flip::None);   // force blank
 //! loop {
 //!     wait_nmi!();
-//!     M7K_CAMERA.turn(1);
+//!     CAMERA.turn(1);
 //!     M7Static::update();
 //!     let sx, sy, size = M7Static::to_screen(enemy_x, enemy_y);
 //! }
@@ -217,31 +222,26 @@ const M7K_PITCH_MIN: i8 = -32;
 const M7K_PITCH_MAX: i8 = 64;
 
 /// A world camera: the point a view is built around, the way it faces
-/// (256 per turn; 0 looks toward -Y), its height and its pitch. Declare
-/// more as `#[lowram] static mut` for more views, and give each view its
-/// camera with `Mode7::set_camera`.
+/// (256 per turn; 0 looks toward -Y), its height and its pitch. The game
+/// declares its cameras, as `#[lowram] static mut` (a view keeps a near
+/// pointer), and gives each view one at its `setup`; `set_camera` changes
+/// it later. Two views may share one.
 ///
 /// Each view reads the height and the pitch its own way: `M7Plain` takes
 /// the pitch as its horizon shift in scanlines (positive looks up),
-/// `M7PlaneRotation` as an angle (0 level, 64 straight down). `M7Static`
+/// `M7PlainRotation` as an angle (0 level, 64 straight down). `M7Static`
 /// reads neither.
 struct M7Camera {
     /// Where it stands on the plane.
     x: M7Coord,
     y: M7Coord,
-    /// The heading.
-    angle: u8,
+    /// The heading: 256 a turn, 0 looks toward -Y.
+    heading: u8,
     /// Height above the plane, 0..127.
     height: u8,
     /// Pitch, `M7K_PITCH_MIN..M7K_PITCH_MAX`.
     pitch: i8,
 }
-
-/// The camera every view follows until its `set_camera`.
-#[lowram]
-static mut M7K_CAMERA: M7Camera = M7Camera {
-    x: M7Coord(0x8000), y: M7Coord(0x8000), angle: 0, height: 64, pitch: 0,
-};
 
 impl M7Camera {
     /// Places the camera.
@@ -255,19 +255,19 @@ impl M7Camera {
         return self.x, self.y;
     }
 
-    /// Faces the camera along `angle`.
-    fn set_angle(*self, angle: u8) {
-        self.angle = angle;
+    /// Faces the camera along heading `h`.
+    fn set_heading(*self, h: u8) {
+        self.heading = h;
     }
 
     /// The heading.
-    fn angle(*self) -> u8 {
-        return self.angle;
+    fn heading(*self) -> u8 {
+        return self.heading;
     }
 
     /// Turns by `d` steps; positive turns the view counterclockwise.
     fn turn(*self, d: i8) {
-        self.angle = self.angle + d as u8;
+        self.heading = self.heading + d as u8;
     }
 
     /// Sets the height above the plane, 0..127 (a view clamps higher).
@@ -308,13 +308,13 @@ impl M7Camera {
     /// Moves `speed` 1/64 texels along the heading (±255); negative moves
     /// back.
     fn forward(*self, speed: i16) {
-        self.step(self.angle, speed);
+        self.step(self.heading, speed);
     }
 
     /// Moves `speed` 1/64 texels across the heading, toward the screen's
     /// right (±255); negative moves left.
     fn strafe(*self, speed: i16) {
-        self.step(self.angle - 64, speed);
+        self.step(self.heading - 64, speed);
     }
 
     /// `speed` along `angle`, the negative way round by a half turn.
@@ -364,17 +364,18 @@ const M7_CENTER_X: u8 = 128;
 const M7_CENTER_Y: u8 = 112;
 
 /// A Mode 7 view: one implementor per way of feeding M7A-D (`M7Static`,
-/// `M7Plain`, `M7PlaneRotation`, a game's own). Every method is an
+/// `M7Plain`, `M7PlainRotation`, a game's own). Every method is an
 /// associated function on the implementing type (`M7Static::nmi()`),
 /// dispatched statically; each implementor keeps its own state.
 trait Mode7 {
-    /// BGMODE 7, M7SEL, and the implementor's own hardware. Force blank,
-    /// or vblank when switching modes.
-    fn setup(repeat: M7Repeat, flip: M7Flip);
+    /// BGMODE 7, M7SEL, and the implementor's own hardware, following
+    /// camera `cam` (the game's). Force blank, or vblank when switching
+    /// modes.
+    fn setup(cam: *M7Camera, repeat: M7Repeat, flip: M7Flip);
 
-    /// The camera `update` builds from, from then on (`M7K_CAMERA` until
-    /// called). The view keeps the pointer, not a copy: moving the camera
-    /// moves the view.
+    /// The camera `update` builds from, from then on, in place of the one
+    /// `setup` took. The view keeps the pointer, not a copy: moving the
+    /// camera moves the view.
     fn set_camera(cam: *M7Camera);
 
     /// The camera `update` builds from.
@@ -426,7 +427,7 @@ trait Mode7 {
 // ============================================================================
 
 /// A `Mode7` view built a scanline at a time into a transport: the floor
-/// (`m7k_plain!`), the true-pitch plane (`m7k_plane_rotation!`) or a
+/// (`m7k_plain!`), the true-pitch plain (`m7k_plain_rotation!`) or a
 /// game's own per-line effect. A build renders rows
 /// into a region of lines, `begin()..end()`; the lines above it, down from
 /// the build's `top`, show the transport's top matrix. A game stacks
@@ -472,12 +473,12 @@ trait Mode7Scan: Mode7 {
 // SCAN VIEW HELPERS
 // ============================================================================
 //
-// The bodies `M7Plain` and `M7PlaneRotation` share, as macros each
+// The bodies `M7Plain` and `M7PlainRotation` share, as macros each
 // instance expands in its own functions, so the code stays the instance's,
 // with its state's absolute addresses. A scan view's state has the fields
 // they name: `top`, `sky`, `ground` (the last build's band), `pivot` (the
-// screen line the matrix pivots on), `angle`, `sin`, `cos`, `depth`, `cx`,
-// `cy`, `hofs`, `vofs`, `line_z`, `line_dist` (`i16`, falling from the
+// screen line the matrix pivots on), `sin`, `cos`, `depth`, `cx`,
+// `cy`, `hofs`, `vofs`, `line_z` (`u8`), `line_dist` (`i16`, falling from the
 // horizon down, but for a texel of the 8-bit z's rounding), `reach` (the
 // cull distance, texels), `gen` (bumped by a table rebuild), `camera`,
 // and per transport buffer the keys `key_angle`, `key_gen`, `key_top`,
@@ -530,8 +531,7 @@ macro_rules! m7k_scan_to_screen($state:ident, $hstate:ident, $x:expr, $y:expr) {
 /// from row `$top`, by row builder `$rows`, unless its keys say they are
 /// there; then the center on camera `$cam` and the scroll.
 macro_rules! m7k_scan_build_rows($state:ident, $hdma:ident, $hstate:ident, $rows:ident, $cam:ident, $top:ident, $n:expr) {
-    let m7k_angle: u8 = $cam.angle;
-    $state.angle = m7k_angle;
+    let m7k_angle: u8 = $cam.heading;
     let m7k_s: i16 = m7k_sin(m7k_angle);
     let m7k_c: i16 = m7k_cos(m7k_angle);
     $state.sin = m7k_s;
@@ -807,7 +807,7 @@ macro_rules! mode7_upload_split($map:ident, $chr:ident) {
 // THE DEPTH SCALE
 // ============================================================================
 //
-// The per-line views' shared table: `M7Plain` and `M7PlaneRotation` both
+// The per-line views' shared table: `M7Plain` and `M7PlainRotation` both
 // turn a 1/Z interpolant into a depth scale through it. Placed wherever it
 // fits, not in the includer's bank: the bank the include restores comes
 // back after this file.
@@ -831,5 +831,5 @@ const fn m7k_build_zrecip() -> [u8; 2321] {
 /// min(255, 32768 / i): the depth scale z (64 a texel per pixel) for 1/Z
 /// interpolant `zr >> 4`. `M7Plain`'s ramp runs 32 lines
 /// (`M7K_PITCH_DOWN`) past 2^21 / 64, so the index stops at
-/// `M7K_ZRECIP_LAST`; `M7PlaneRotation` clamps to it.
+/// `M7K_ZRECIP_LAST`; `M7PlainRotation` clamps to it.
 far static M7K_ZRECIP: [u8; 2321] = m7k_build_zrecip();

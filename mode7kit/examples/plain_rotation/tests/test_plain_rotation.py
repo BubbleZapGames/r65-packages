@@ -1,8 +1,8 @@
-"""mode7kit's true-pitch plane, M7PlaneRotation, driven through the plane
-example ROM.
+"""mode7kit's true-pitch plain, M7PlainRotation, driven through the plain
+rotation example ROM.
 
 Each test sets a view by writing the camera (heading, height, pitch), lets
-the frame run, and checks the plane's state against the same integer math
+the frame run, and checks the view's state against the same integer math
 in Python, and its picture and projection against an ideal ray-cast camera.
 """
 import math
@@ -18,10 +18,10 @@ ASSETS = HERE.parent.parent / "flyer" / "assets"
 # Struct offsets (packed, declaration order).
 H_SEL, H_CX, H_CY, H_HOFS, H_VOFS, H_BACK = 0, 1, 3, 5, 7, 9          # M7HDMA
 H_ABI, H_CDI, H_AB, H_CD = 21, 85, 149, 1941
-P_SKY, P_GROUND, P_BUILT_HEIGHT, P_BUILT_PITCH, P_FIRST = 1, 2, 3, 4, 6  # M7PlaneRotation
-P_FOOT, P_SIN_T, P_DOWN, P_CY, P_VOFS = 7, 9, 11, 21, 25
-P_LINE_Z, P_LINE_DIST = 27, 475
-CAM_ANGLE, CAM_HEIGHT, CAM_PITCH = 4, 5, 6                             # M7Camera
+P_SKY, P_GROUND, P_BUILT_HEIGHT, P_BUILT_PITCH, P_FIRST = 1, 2, 3, 4, 6  # M7PlainRotation
+P_FOOT, P_SIN_T, P_DOWN, P_CY, P_VOFS = 7, 9, 11, 20, 24
+P_LINE_Z, P_LINE_DIST = 26, 250
+CAM_HEADING, CAM_HEIGHT, CAM_PITCH = 4, 5, 6                             # M7Camera
 DATA_WORDS = 448
 IND = 32
 CLIP = 4096
@@ -151,9 +151,9 @@ def match(got, theta, height, heading, top):
 # -- driving the ROM --------------------------------------------------------------
 
 def set_view(s, angle=None, height=None, pitch=None):
-    cam = s.resolve("M7K_CAMERA")
+    cam = s.resolve("CAMERA")
     if angle is not None:
-        s.write(cam + CAM_ANGLE, angle & 0xFF)
+        s.write(cam + CAM_HEADING, angle & 0xFF)
     if height is not None:
         s.write(cam + CAM_HEIGHT, height)
     if pitch is not None:
@@ -161,8 +161,8 @@ def set_view(s, angle=None, height=None, pitch=None):
     s.wait(8)
 
 
-def plane(s):
-    return s.raw("M7K_PLANE_ROTATION").bytes()
+def plain(s):
+    return s.raw("M7K_PLAIN_ROTATION").bytes()
 
 
 def hdma(s):
@@ -196,14 +196,14 @@ def test_line_tables(pl, theta, height):
     """The first ground line, the foot and both line tables, as the formulas."""
     s = pl
     set_view(s, angle=0, height=height, pitch=theta)
-    p = plane(s)
+    p = plain(s)
     first, foot, z, d = tables(theta, height)
     assert (p[P_BUILT_HEIGHT], p[P_BUILT_PITCH], p[P_FIRST]) == (height, theta, first)
     assert (p[P_SKY], p[P_GROUND]) == (first, 224 - first)
     assert word(p, P_FOOT, signed=False) == foot
     assert p[P_DOWN] == (theta == 64)
     n = len(z)
-    assert words(p[P_LINE_Z:P_LINE_Z + 2 * n], signed=False) == z
+    assert list(p[P_LINE_Z:P_LINE_Z + n]) == z
     assert words(p[P_LINE_DIST:P_LINE_DIST + 2 * n]) == d
     # it falls from the horizon down, but for a texel of z's 8-bit rounding
     assert all(d[i + 1] <= d[i] + 1 for i in range(n - 1))
@@ -211,10 +211,10 @@ def test_line_tables(pl, theta, height):
 
 @pytest.mark.parametrize("pitch,used", [(0, 6), (-32, 6), (5, 6), (64, 64), (100, 64)])
 def test_pitch_is_clamped(pl, pitch, used):
-    """The camera's pitch is the plane's angle, clamped to 6..64."""
+    """The camera's pitch is the view's angle, clamped to 6..64."""
     s = pl
     set_view(s, angle=0, height=64, pitch=pitch)
-    assert plane(s)[P_BUILT_PITCH] == used
+    assert plain(s)[P_BUILT_PITCH] == used
 
 
 @pytest.mark.parametrize("angle", [10, 70, 150, 200, 0, 64, 128, 192])
@@ -222,7 +222,7 @@ def test_rows(pl, angle):
     """Four products a row, with each quadrant's signs."""
     s = pl
     set_view(s, angle=angle, height=64, pitch=20)
-    p = plane(s)
+    p = plain(s)
     first, _, z, _ = tables(20, 64)
     sin_t = word(p, P_SIN_T, signed=False)
     t, k = shown(s, H_ABI)
@@ -235,7 +235,7 @@ def test_rows(pl, angle):
 def test_pivot_is_the_point_under_the_camera(pl):
     s = pl
     set_view(s, angle=0, height=64, pitch=24)
-    p = plane(s)
+    p = plain(s)
     _, foot, _, _ = tables(24, 64)
     assert word(p, P_VOFS, signed=False) == (word(p, P_CY, signed=False) - foot) & 0xFFFF
 
@@ -248,7 +248,7 @@ def test_straight_down_is_one_held_row(pl, angle):
     lines by once entries, pivoting on the screen's center."""
     s = pl
     set_view(s, angle=angle, height=64, pitch=64)
-    p = plane(s)
+    p = plain(s)
     assert p[P_DOWN] == 1 and (p[P_SKY], p[P_GROUND]) == (0, 224)
     t, k = shown(s, H_ABI)
     entries = []
@@ -276,7 +276,7 @@ def test_picture_matches_a_ray_cast(pl, tmp_path, theta, least):
     one texel on most pixels: the error is the 8-bit z."""
     s = pl
     set_view(s, angle=10, height=64, pitch=theta)
-    top = plane(s)[P_SKY]
+    top = plain(s)[P_SKY]
     if theta < 64:
         top += 16                      # under the haze's 16 lines
     got = Image.open(s.screenshot(tmp_path / f"p{theta}.png")).convert("RGB").crop((0, 7, 256, 231))
@@ -309,7 +309,7 @@ def test_to_screen_follows_the_tables(pl, theta):
 
 @pytest.mark.parametrize("theta", [12, 24, 40])
 def test_to_screen_matches_a_ray_cast(pl, theta):
-    """Every object the plane shows is within 2 pixels across and 3 lines
+    """Every object the view shows is within 2 pixels across and 3 lines
     down of where an ideal camera puts it, the 8-bit z's error the ground
     it stands on has too; the ones it hides are off the ground it draws."""
     s = pl
@@ -320,15 +320,16 @@ def test_to_screen_matches_a_ray_cast(pl, theta):
         sx, sy = pos[2 * i], pos[2 * i + 1]
         ix, iy = project(theta, 64, 0, OBJECT_X[i], OBJECT_Y[i])
         if sy == HIDDEN:
-            assert not (plane(s)[P_SKY] <= iy < 224 and 0 <= ix < 256), i
+            assert not (plain(s)[P_SKY] <= iy < 224 and 0 <= ix < 256), i
             continue
         shown_any = True
         assert abs(sx - ix) <= 2 and abs(sy - iy) <= 3, (i, sx, sy, ix, iy)
     assert shown_any
 
 
-def test_only_the_plane(pl):
-    """The floor the plane's file includes for its table costs nothing."""
+def test_only_the_plain_rotation(pl):
+    """The floor's file, which the view's no longer includes, costs nothing:
+    no floor state, no floor tables."""
     names = set(pl.rom.symbols.names())
-    assert not any("M7K_PLAIN" in n for n in names)
-    assert not any("M7K_ROW_SKY" in n for n in names)
+    assert "M7K_PLAIN" not in names and "M7K_PLAIN_ROTATION" in names
+    assert "__M7K_ROW_SKY_data" not in names

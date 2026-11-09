@@ -11,8 +11,8 @@ R65. The README is the user guide.
   So `Mode7` is a trait, and each view is a type implementing it. A game's
   loop and sprite code read the same in any; only the properties differ.
 - **Minimal to maximal.** A rotating map costs two small tables and 40
-  bytes. A perspective floor costs about 4.6 KB of RAM, and a second floor
-  over the same transport about 0.9 KB more. A game includes the file of the
+  bytes. A perspective floor costs about 4.4 KB of RAM, and a second floor
+  over the same transport about 0.7 KB more. A game includes the file of the
   view it uses and gets the files it needs with it (`include!` runs each
   file once). Tables build at compile time with `const fn`, and the
   compiler removes code, tables and state a game never uses.
@@ -42,24 +42,24 @@ R65. The README is the user guide.
 core.r65 ◄─┬─ static.r65                         M7Static
  (traits,  │
   tables)  └─ hdma.r65 ◄─┬─ plain.r65            M7HDMA ◄ M7Plain
-             (m7k_hdma!, └─ plain_rotation.r65   M7HDMA ◄ M7PlaneRotation
+             (m7k_hdma!, └─ plain_rotation.r65   M7HDMA ◄ M7PlainRotation
               M7HDMA)
 ```
 
 | Layer | File | Writes | Default instance | `Mode7`? | ROM | RAM |
 |---|---|---|---|---|---|---|
-| core | `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Repeat`, `M7Flip`, `m7k_sin/cos`, `m7k_heading`, `m7k_recip`, `M7Camera`, register writers, the DMA channel array, the multiplies, uploads | `M7K_CAMERA` | | 640 B (sin/cos), 512 B (reciprocal), 2321 B (`M7K_ZRECIP`, for a per-line view) | 7 B a camera |
+| core | `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Repeat`, `M7Flip`, `m7k_sin/cos`, `m7k_heading`, `m7k_recip`, `M7Camera`, register writers, the DMA channel array, the multiplies, uploads | none: the game declares its cameras | | 640 B (sin/cos), 512 B (reciprocal), 2321 B (`M7K_ZRECIP`, for a per-line view) | none (7 B a game camera) |
 | flat view | `static.r65` | `M7Static` | `M7K_STATIC` | yes | code | 31 B |
 | transport | `hdma.r65` | `m7k_hdma!`: per-line matrices, double buffer, indirect tables, M7SEL and the view, HDMAEN; the HDMA table writers | `M7HDMA` (224 lines, ch 2–3) | no | code | 16·lines + 151 B an instance (3735 B for `M7HDMA`) |
-| floor | `plain.r65` | `m7k_plain!`: a camera's perspective floor in a transport, its projections | `M7Plain` | yes, and `Mode7Scan` | 640 B | 941 B |
-| plane | `plain_rotation.r65` | `m7k_plane_rotation!`: the plane at a true pitch angle, its projections | `M7PlaneRotation` | yes, and `Mode7Scan` | none | 947 B |
+| floor | `plain.r65` | `m7k_plain!`: a camera's perspective floor in a transport, its projections | `M7Plain` | yes, and `Mode7Scan` | 640 B | 716 B |
+| plain rotation | `plain_rotation.r65` | `m7k_plain_rotation!`: the plain at a true pitch angle, its projections | `M7PlainRotation` | yes, and `Mode7Scan` | none | 722 B |
 
 A game includes the file of the view it uses:
 
 ```rust
 include!("mode7kit/static.r65")       // M7Static, the camera, the tables it uses
 include!("mode7kit/plain.r65")        // M7Plain over M7HDMA
-include!("mode7kit/plain_rotation.r65") // M7PlaneRotation over M7HDMA
+include!("mode7kit/plain_rotation.r65") // M7PlainRotation over M7HDMA
 include!("mode7kit/hdma.r65")         // M7HDMA alone, for a game's own effect
 ```
 
@@ -94,14 +94,14 @@ file of the layer that uses them:
 ```rust
 m7k_hdma!(M7HDMA, M7K_HDMA, 224, 2, 3);                                  // hdma.r65
 m7k_plain!(M7Plain, M7K_PLAIN, M7HDMA, M7K_HDMA, m7k_rows_mul);          // plain.r65
-m7k_plane_rotation!(M7PlaneRotation, M7K_PLANE_ROTATION, M7HDMA, M7K_HDMA,
-                    m7k_plane_rows_mul);                                 // plain_rotation.r65
+m7k_plain_rotation!(M7PlainRotation, M7K_PLAIN_ROTATION, M7HDMA, M7K_HDMA,
+                    m7k_plain_rows_mul);                                 // plain_rotation.r65
 ```
 
 | Macro | Parameters |
 |---|---|
 | `m7k_hdma!(Name, STATE, lines, ch_ab, ch_cd)` | `lines`: matrix rows a buffer holds, at most 224. The channels for M7A/B and M7C/D. |
-| `m7k_plain!(Name, STATE, Hdma, HDMA_STATE, rows)` | The transport it writes into, by type and state static; `rows`, the row-builder macro (`m7k_rows_mul`). The camera is set at run time (`set_camera`). |
+| `m7k_plain!(Name, STATE, Hdma, HDMA_STATE, rows)` | The transport it writes into, by type and state static; `rows`, the row-builder macro (`m7k_rows_mul`). The camera is passed at run time, to `setup`. |
 
 - **Names.** R65 can't concatenate identifiers, so a macro is passed every
   name it creates: the type and its state static. A game using only the
@@ -130,14 +130,14 @@ m7k_plane_rotation!(M7PlaneRotation, M7K_PLANE_ROTATION, M7HDMA, M7K_HDMA,
 `core.r65` has the trait the views implement, the M7SEL enums, `M7Coord`,
 the camera (below), two stateless register writers, the DMA channel array
 (see [Instance macros](#instance-macros)), the fixed-point multiplies and
-the upload macros. Its one state is the default camera, `M7K_CAMERA`, and
-its two tables are the sin/cos table, which the camera's movement and every
+the upload macros. It declares no state: the game declares its cameras.
+Its tables are the sin/cos table, which the camera's movement and every
 view's matrix read, and the zoom reciprocal (both below).
 
 ```rust
 trait Mode7 {
-    fn setup(repeat: M7Repeat, flip: M7Flip);   // BGMODE 7, M7SEL, the mode's own hardware
-    fn set_camera(cam: *M7Camera);              // the camera update() follows (M7K_CAMERA until set)
+    fn setup(cam: *M7Camera, repeat: M7Repeat, flip: M7Flip); // BGMODE 7, M7SEL, own hardware; follow cam
+    fn set_camera(cam: *M7Camera);              // follow another camera from now on
     fn camera() -> *M7Camera;                   // that camera
     fn update();                                // build the next frame from the camera + properties
     fn nmi();                                   // commit the built frame; from the NMI handler
@@ -313,8 +313,8 @@ size (`M7K_RECIP[z]` is 1/k in 8.8).
 
 ## The camera and world coordinates (core.r65)
 
-`core.r65` holds the camera type, the default camera `M7K_CAMERA`, and the
-coordinate helpers the projections share.
+`core.r65` holds the camera type and the coordinate helpers the
+projections share. It declares no camera: the game does.
 
 ### The coordinate type
 
@@ -345,11 +345,14 @@ that difference.
 ### The world camera
 
 ```rust
-struct M7Camera { x: M7Coord, y: M7Coord, angle: u8, height: u8, pitch: i8 }
+struct M7Camera { x: M7Coord, y: M7Coord, heading: u8, height: u8, pitch: i8 }
+
+// the game's
 #[lowram]
-static mut M7K_CAMERA: M7Camera = M7Camera {
-    x: M7Coord(512 << 6), y: M7Coord(512 << 6), angle: 0, height: 64, pitch: 0,
+static mut CAMERA: M7Camera = M7Camera {
+    x: M7Coord(512 << 6), y: M7Coord(512 << 6), heading: 0, height: 64, pitch: 0,
 };
+M7Plain::setup(&CAMERA, M7Repeat::Wrap, M7Flip::None);
 ```
 
 The methods take `*self`, so a game may have several cameras
@@ -358,16 +361,21 @@ The methods take `*self`, so a game may have several cameras
 | Method | Does |
 |---|---|
 | `set(x: M7Coord, y: M7Coord)`, `get()` | Position |
-| `set_angle(a: u8)`, `angle()` | Heading, 256 per turn; 0 looks toward −Y |
+| `set_heading(h: u8)`, `heading()` | Heading, 256 per turn; 0 looks toward −Y |
 | `turn(d: i8)` | Adds to the heading |
 | `set_height(h: u8)`, `height()` | Height above the plane, 0..127 |
-| `set_pitch(p: i8)`, `pitch()`, `tilt(d: i8)` | Pitch, −32..64 (`tilt` keeps it there). Each view reads it its own way: `M7Plain` as a horizon shift in scanlines (positive looks up), `M7PlaneRotation` as an angle (6..64, 64 straight down). `M7Static` ignores height and pitch. |
+| `set_pitch(p: i8)`, `pitch()`, `tilt(d: i8)` | Pitch, −32..64 (`tilt` keeps it there). Each view reads it its own way: `M7Plain` as a horizon shift in scanlines (positive looks up), `M7PlainRotation` as an angle (6..64, 64 straight down). `M7Static` ignores height and pitch. |
 | `forward(speed: i16)` | Moves `speed` 1/64 texels along the heading (`m7k_heading`); negative moves back |
 | `strafe(speed: i16)` | Moves across the heading, toward the screen's right (`m7k_heading(angle − 64)`); negative moves left |
 | `move_by(dx: i16, dy: i16)` | Adds a 10.6 delta. Wraps for free. |
 
-Every view follows `M7K_CAMERA` until its `set_camera(&cam)`, so switching
-between `M7Static` and a floor keeps the view where it was. A view keeps
+**The game owns the cameras.** `Mode7::setup(cam, repeat, flip)` takes
+one, so a view can't be set up without it: forgetting is a compile error,
+not a read through a null pointer. (A view's state starts with a 0
+pointer, which only an `update` before `setup` would follow.)
+`set_camera(&cam)` swaps it later. Two views set up with one camera show
+the same place, so switching between `M7Static` and a floor keeps the
+view where it was. A view keeps
 the pointer in its state, not a copy, so the game moves the camera and the
 next `update()` follows. The pointer is near, so a camera must be a
 `#[lowram]` static (a `#[ram]` one's address is far and won't type-check).
@@ -435,7 +443,7 @@ simply doesn't project.
 
 | Function | Does |
 |---|---|
-| `setup(repeat, flip)` | BGMODE = 7, and M7SEL with its copy. Call in force blank, or in vblank when switching modes. The game still owns TM. |
+| `setup(cam, repeat, flip)` | Follows `cam`; BGMODE = 7, and M7SEL with its copy. Call in force blank, or in vblank when switching modes. The game still owns TM. |
 | `update()` | `rotate_scale(camera angle, zx, zy)`, then pins the camera's texel to `(px, py)`: center = camera, hofs = cx − px, vofs = cy − py. |
 | `nmi()` | `m7k_write_matrix`, then `m7k_write_view`. Never writes HDMAEN. |
 | `to_screen`, `to_world` | The flat projection below. `size` is `zx << 2`, the horizontal texel size; sy is never `M7K_HIDDEN`. |
@@ -608,9 +616,9 @@ that implements both drops in by name.
 
 ### Shared scan-view code
 
-`M7Plain` and `M7PlaneRotation` differ in their line tables, their rows'
+`M7Plain` and `M7PlainRotation` differ in their line tables, their rows'
 products, their sky and pivot, `to_world` (the floor's forward distance is
-exact, from (foot − l)·z; the plane reads its table) and `segment`. The
+exact, from (foot − l)·z; `M7PlainRotation` reads its table) and `segment`. The
 rest is one body in `core.r65`, as macros each instance expands in its own
 functions, so the code stays the instance's, on absolute addresses, at no
 run-time cost (the bench didn't move):
@@ -624,7 +632,7 @@ run-time cost (the bench didn't move):
 They need the same state fields in both, named in `core.r65`'s comment:
 the band, `pivot`, the heading, the view, `line_z`, a signed `line_dist`,
 `reach`, `gen` and the keys. The row builders take the same arguments
-(the plane's reads its `sin_t` from its state), so the build tail calls
+(`M7PlainRotation`'s reads its `sin_t` from its state), so the build tail calls
 either.
 
 ### HDMA layout
@@ -743,10 +751,10 @@ struct $name {
     height: u8, pitch: i8,                  // properties
     top: u8, sky: u8, ground: u8,           // the last build's band top, horizon (screen line), ground lines
     foot: u8, built_height: u8,             // the line tables' foot and height
-    angle: u8, sin: i16, cos: i16,          // the last build's heading
+    sin: i16, cos: i16,                     // the last build's heading
     depth: i16,                             // the last projected point's
     cx: u16, cy: u16, hofs: u16, vofs: u16, // the last build's view
-    line_z: [u16; 224], line_dist: [i16; 224],
+    line_z: [u8; 224], line_dist: [i16; 224],
     key_*: [u8; 2],                         // per buffer: see Build keys
     camera: *M7Camera,
     gen: u8, pivot: u16, reach: u16,        // table rebuilds, the pivot line, the cull distance
@@ -757,7 +765,7 @@ static mut $state: $name = /* height 64, pitch 0 */;
 
 | Function | Does |
 |---|---|
-| `setup(repeat, flip)` | The transport's setup; the keys cleared |
+| `setup(cam, repeat, flip)` | Follows `cam`; the transport's setup; the keys cleared |
 | `stop()` | The transport's stop |
 | `update()` | `build(0, LINES)`, then `publish()` |
 | `nmi()` | The transport's `commit()` |
@@ -782,7 +790,7 @@ down a little shows more floor. Per-band geometry would need the
 
 ### Tables
 
-`M7K_ZRECIP: [u8; 2321]` (in `core.r65`, shared with `M7PlaneRotation`)
+`M7K_ZRECIP: [u8; 2321]` (in `core.r65`, shared with `M7PlainRotation`)
 is dizworld's `build_z_table`:
 `T[0] = 255`, and `T[i] = min(255, 32768 / i)`. The index is `zr >> 4`.
 At dizworld's near edge `zr` reaches `2^21 / s1_min = 2^21 / 64 = 32768`
@@ -866,7 +874,7 @@ unpitched floor moved p lines. This is the look-up/look-down of Doom-era
 engines. It is close for small angles, and it inherits the A = D
 approximation the floor already makes. An exact pitched camera needs
 A ≠ D, 4 multiplies a row instead of 2: that is
-[`M7PlaneRotation`](#plain_rotationr65-m7planerotation-a-plane-at-a-true-pitch),
+[`M7PlainRotation`](#plain_rotationr65-m7plainrotation-a-plain-at-a-true-pitch),
 a second view rather than a mode of this one.
 
 **No extra work per line.** Line l counts down from the horizon, so
@@ -913,8 +921,8 @@ the floor has its own `to_screen` and `to_world`, built from the two line
 tables `rebuild_lines` fills:
 
 ```rust
-line_z: [u16; 224],      // z(l)
-line_dist: [i16; 224],   // forward distance seen on line l, texels (signed, as the plane's)
+line_z: [u8; 224],       // z(l), an M7K_ZRECIP byte
+line_dist: [i16; 224],   // forward distance seen on line l, texels (signed, as `M7PlainRotation`'s)
 ```
 
 On ground line l (screen y = horizon + l), the matrix maps the screen
@@ -981,27 +989,27 @@ together.
 Cost: 13 scanlines per visible object, 8 behind the camera, 4 culled (see
 [Cycle budget](#cycle-budget)).
 
-## plain_rotation.r65: `M7PlaneRotation`, a plane at a true pitch
+## plain_rotation.r65: `M7PlainRotation`, a plain at a true pitch
 
 `M7Plain`'s pitch is a horizon shift: its ground perspective depends only
 on the height, so tilting slides the picture, and it can't look straight
-down. `M7PlaneRotation` takes the camera's pitch as a real angle and
+down. `M7PlainRotation` takes the camera's pitch as a real angle and
 rebuilds its line tables for it, so the foreshortening changes as a real
 camera's does. For a real camera 1/depth is linear in the screen line, so
 a pitch or height change costs two divisions and a table read per line.
 
-`m7k_plane_rotation!(Name, STATE, Hdma, HDMA_STATE, rows)` is shaped like
-`m7k_plain!`, with the default instance `M7PlaneRotation` (state
-`M7K_PLANE_ROTATION`, 947 bytes) over `M7HDMA` and the row builder
-`m7k_plane_rows_mul`. It implements `Mode7` and `Mode7Scan`, so a
-per-line add-on written for the floor works with it: `examples/plane/`
+`m7k_plain_rotation!(Name, STATE, Hdma, HDMA_STATE, rows)` is shaped like
+`m7k_plain!`, with the default instance `M7PlainRotation` (state
+`M7K_PLAIN_ROTATION`, 722 bytes) over `M7HDMA` and the row builder
+`m7k_plain_rows_mul`. It implements `Mode7` and `Mode7Scan`, so a
+per-line add-on written for the floor works with it: `examples/plain_rotation/`
 puts the flyer's own sky over it. It includes only `core.r65`, which
 holds the depth scale `M7K_ZRECIP` both per-line views read.
 
 ### The pitch, and its range
 
 The camera's `pitch` is the angle θ in 256ths of a turn: 0 level, 64
-straight down. The plane takes **6..64** (8.4° to 90°) and clamps the
+straight down. `M7PlainRotation` takes **6..64** (8.4° to 90°) and clamps the
 rest. The limit is the hardware's. The matrix pivots on the point under
 the camera, at screen line 112 + 128·cot θ (`foot`), and Mode 7 clips its
 (VOFS − Y0) term to 10-bit signed, so that point must be within 1023
@@ -1056,12 +1064,12 @@ mid-picture.
 
 `Mode7Scan::segment(p)` exists for this. A view appends its own region's
 segments, so a game laying out several views (the split example) calls
-`segment` instead of naming `seg_rows`, and a straight-down plane in a
+`segment` instead of naming `seg_rows`, and a straight-down `M7PlainRotation` in a
 half works too.
 
 ### Projection
 
-`to_screen` is the floor's search over the plane's tables:
+`to_screen` is the floor's search over `M7PlainRotation`'s tables:
 1. Rotate the offset into forward and lateral distances (`m7k_rotate14`).
 2. Cull by the farthest |`line_dist`| plus that line's half width, 2z.
 3. Binary-search `line_dist` for sy, with signed compares.
@@ -1091,7 +1099,7 @@ Bench cases 18–22, at height 64, in scanlines:
 
 **Accuracy.** Against an ideal ray-cast camera, the example's tests
 require at least 85% of ground pixels within one texel at 8° and 16°, 90%
-at 32° and 99% straight down. `to_screen` matches the plane's own tables
+at 32° and 99% straight down. `to_screen` matches the view's own tables
 exactly, and the ideal camera within 2 pixels across and 3 lines down.
 The error is the 8-bit z (`M7K_ZRECIP` is `u8`) and the 1.7 forward
 factor. The ground drawn has the same error, so sprites stay on it.
@@ -1102,7 +1110,7 @@ A game with several views switches in vblank, straight after `wait_nmi!()`:
 
 ```rust
 Old::stop();                              // when Old is an HDMA view
-New::setup(New::repeat(), New::flip());   // the camera is shared, so the view carries over
+New::setup(&CAMERA, New::repeat(), New::flip());   // the same camera, so the view carries over
 // and the NMI handler now calls New::nmi()
 ```
 
@@ -1185,7 +1193,7 @@ own copy of the flyer example's sky bands, built around the floor.
 - Statics are named `M7K_*`, free functions `m7k_*`, instance macros
   `m7k_*!`. Public types are the `Mode7` trait, `M7Static`, `M7Coord`,
   `M7Camera`, `M7Repeat`, `M7Flip`, `M7KChannel` and the default
-  instances `M7HDMA`, `M7Plain` and `M7PlaneRotation`.
+  instances `M7HDMA`, `M7Plain` and `M7PlainRotation`.
 - A macro's locals are prefixed `m7k_`: R65 macros have no hygiene.
 - Every public item has a `///` doc comment, and every file has a `//!`
   header naming what it includes and what it costs.
@@ -1213,7 +1221,7 @@ but the beach ball use dizworld's assets (copied from
 attribution) and draw no sprites.
 
 - **`examples/topdown/`** includes `static.r65`. The D-pad moves along and
-  across the heading (`M7K_CAMERA.forward` / `strafe`), L/R turn, A/X zoom
+  across the heading (its `CAMERA`'s `forward` / `strafe`), L/R turn, A/X zoom
   both axes, Y/B stretch only the vertical axis (`M7Static::set_zoom`).
 - **`examples/flyer/`** includes `plain.r65`, and has its own sky bands and
   `Horizon` background in `src/` (see its README). dizworld's controls;
@@ -1223,8 +1231,8 @@ attribution) and draw no sprites.
 - **`examples/split/`** includes `plain.r65`: a second camera and floor
   instance, with its own bands, views and `m7k_split!` in `src/` (see its
   README). Pad 1's D-pad drives the top camera, Y/A/X/B the bottom one.
-- **`examples/plane/`** includes `plain_rotation.r65`: the flyer with
-  `M7PlaneRotation` for the view, under the flyer's sky (its own copy in
+- **`examples/plain_rotation/`** includes `plain_rotation.r65`: the flyer with
+  `M7PlainRotation` for the view, under the flyer's sky (its own copy in
   `src/`). X/B tilt from 8° to straight down. Its tests check the line
   tables and rows against the formulas, the held row straight down, the
   picture and the projection against a ray-cast camera.
@@ -1294,12 +1302,12 @@ themselves against the formulas.
 - **Exact perspective.** A ≠ D lets the vertical foreshortening (D = λ·F/y)
   differ from the horizontal (A = λ). That costs 4 multiplies per line
   instead of 2. `M7Plain` keeps dizworld's A = D approximation;
-  `M7PlaneRotation` pays for A ≠ D.
+  `M7PlainRotation` pays for A ≠ D.
 - **Exact pitch below 8°.** The floor's [pitch](#pitch) is a y-shear;
-  [`M7PlaneRotation`](#plain_rotationr65-m7planerotation-a-plane-at-a-true-pitch)
+  [`M7PlainRotation`](#plain_rotationr65-m7plainrotation-a-plain-at-a-true-pitch)
   is the exact view, from 8.4° to straight down. Level and upward views
   need a pivot other than the point under the camera.
-- **The plane's cost.** Turning at 45° (275 lines) and a pitch change
+- **`M7PlainRotation`'s cost.** Turning at 45° (275 lines) and a pitch change
   (395) take longer than a frame; its row and table loops need the work
   the floor's got. A 16-bit z would also lift its accuracy at shallow
   angles.

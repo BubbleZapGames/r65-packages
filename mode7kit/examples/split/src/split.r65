@@ -17,14 +17,16 @@
 //! include!("split.r65")
 //!
 //! #[lowram]
-//! static mut CAM2: M7Camera = M7Camera { x: M7Coord(0x8000), y: M7Coord(0x8000), angle: 0 };
+//! static mut CAM1: M7Camera = M7Camera { x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0 };
+//! #[lowram]
+//! static mut CAM2: M7Camera = M7Camera { x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 128, height: 64, pitch: 0 };
 //!
 //! m7k_plain!(Floor2, FLOOR2, M7HDMA, M7K_HDMA, m7k_rows_mul);
 //! m7k_bands!(Bands4, BANDS4, M7HDMA, 4, 4, 5);       // 4 bands, no COLDATA
 //! m7k_split!(Split, SPLIT, M7HDMA, Bands4, M7Views, M7Plain, Floor2);
 //!
-//! Floor2::set_camera(&CAM2);                        // the top keeps M7K_CAMERA
-//! Split::setup(M7Repeat::Wrap, M7Flip::None);       // force blank
+//! Floor2::set_camera(&CAM2);                        // the bottom's, first
+//! Split::setup(&CAM1, M7Repeat::Wrap, M7Flip::None); // the top's; force blank
 //! loop { wait_nmi!(); Split::update(); }
 //!
 //! #[interrupt(nmi)]
@@ -200,10 +202,12 @@ macro_rules! m7k_split($name:ident, $state:ident, $hdma:ident, $bands:ident, $vi
     }
 
     impl Mode7 for $name {
-        /// Both floors' setup, the four bands and the four views.
-        fn setup(repeat: M7Repeat, flip: M7Flip) {
-            $fa::setup(repeat, flip);
-            $fb::setup(repeat, flip);
+        /// Both floors' setup, the four bands and the four views. The top
+        /// floor follows `cam`; the bottom keeps the camera its own
+        /// `set_camera` gave it, so set that first.
+        fn setup(cam: *M7Camera, repeat: M7Repeat, flip: M7Flip) {
+            $fa::setup(cam, repeat, flip);
+            $fb::setup($fb::camera(), repeat, flip);
             let half: u8 = $state.half;
             $bands::set_band(0, 32, $state.sky_mode, $state.sky_tm);
             $bands::set_band(1, half - 32, BG::Mode7, $state.ground_tm);
@@ -247,11 +251,11 @@ macro_rules! m7k_split($name:ident, $state:ident, $hdma:ident, $bands:ident, $vi
             $bands::set_lines(1, ground_a);
             $bands::set_lines(2, sky_b);
             $bands::fill_back();
-            $name::sky_view(0, sky_a, cam_a.angle, begin_a);
+            $name::sky_view(0, sky_a, cam_a.heading, begin_a);
             let acx, acy = $fa::center();
             let ahofs, avofs = $fa::scroll();
             $views::set_view(1, ground_a, acx, acy, ahofs, avofs);
-            $name::sky_view(2, sky_b, cam_b.angle, begin_b);
+            $name::sky_view(2, sky_b, cam_b.heading, begin_b);
             let bcx, bcy = $fb::center();
             let bhofs, bvofs = $fb::scroll();
             $views::set_view(3, 0, bcx, bcy, bhofs, bvofs);

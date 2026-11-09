@@ -1,5 +1,5 @@
 [package]
-name    = "mode7kit_plane"
+name    = "mode7kit_plain_rotation"
 version = "0.1.0"
 
 [bin]

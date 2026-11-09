@@ -12,10 +12,15 @@
 //! ```
 //! include!("mode7kit/static.r65")
 //!
-//! M7Static::setup(M7Repeat::Wrap, M7Flip::None);   // in force blank
+//! #[lowram]
+//! static mut CAMERA: M7Camera = M7Camera {
+//!     x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0,
+//! };
+//!
+//! M7Static::setup(&CAMERA, M7Repeat::Wrap, M7Flip::None);   // force blank
 //! loop {
 //!     wait_nmi!();
-//!     M7K_CAMERA.turn(1);
+//!     CAMERA.turn(1);
 //!     M7Static::set_zoom(80, 80);
 //!     M7Static::update();
 //!     let sx, sy, size = M7Static::to_screen(enemy_x, enemy_y);
@@ -69,12 +74,14 @@ static mut M7K_STATIC: M7Static = M7Static {
     cx: 0, cy: 0, hofs: 0, vofs: 0,
     px: 128, py: 112,
     zx: 64, zy: 64,
-    camera: &M7K_CAMERA,
+    camera: 0 as *M7Camera,
 };
 
 impl Mode7 for M7Static {
-    /// Puts the PPU in Mode 7 and sets M7SEL. The game still owns TM.
-    fn setup(repeat: M7Repeat, flip: M7Flip) {
+    /// Puts the PPU in Mode 7, sets M7SEL and follows camera `cam`. The
+    /// game still owns TM.
+    fn setup(cam: *M7Camera, repeat: M7Repeat, flip: M7Flip) {
+        M7K_STATIC.camera = cam;
         BGMODE = BG::Mode7 as u8;
         M7K_STATIC.sel = repeat as u8 | flip as u8;
         M7SEL = M7K_STATIC.sel;
@@ -92,7 +99,7 @@ impl Mode7 for M7Static {
     /// camera's texel to the pivot pixel.
     fn update() {
         let cam: *M7Camera = M7K_STATIC.camera;
-        M7Static::rotate_scale(cam.angle, M7K_STATIC.zx, M7K_STATIC.zy);
+        M7Static::rotate_scale(cam.heading, M7K_STATIC.zx, M7K_STATIC.zy);
         let cx: u16 = cam.x.texel();
         let cy: u16 = cam.y.texel();
         M7K_STATIC.cx = cx;

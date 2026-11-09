@@ -15,9 +15,9 @@ import pytest
 H_SEL, H_CY, H_VOFS, H_BACK, H_READY, H_HDMAEN = 0, 3, 7, 9, 10, 11   # M7HDMA
 H_TOP, H_ABI, H_CDI, H_AB, H_CD = 13, 21, 85, 149, 1941
 F_SKY, F_GROUND, F_FOOT, F_BUILT_HEIGHT = 1, 2, 3, 4                 # M7Plain
-F_CY, F_VOFS, F_LINE_Z, F_LINE_DIST = 14, 18, 20, 468
+F_CY, F_VOFS, F_LINE_Z, F_LINE_DIST = 13, 17, 19, 243
 B_BGM, B_TMT, B_COL, B_FADE, B_STRIDE, B_COL_STRIDE = 11, 37, 63, 107, 13, 22  # M7Bands
-CAM_ANGLE, CAM_HEIGHT, CAM_PITCH = 4, 5, 6                             # M7Camera
+CAM_HEADING, CAM_HEIGHT, CAM_PITCH = 4, 5, 6                             # M7Camera
 PITCH_DOWN, PITCH_UP = 32, 64
 DATA_WORDS = 448                 # one buffer of rows: 224 lines x A, B (or C, D)
 IND = 32                         # one buffer of an indirect table
@@ -91,11 +91,11 @@ def fade():
 
 def set_view(s, angle=None, height=None, pitch=None):
     if angle is not None:
-        s.write(s.resolve("M7K_CAMERA") + CAM_ANGLE, angle & 0xFF)
+        s.write(s.resolve("CAMERA") + CAM_HEADING, angle & 0xFF)
     if height is not None:
-        s.write(s.resolve("M7K_CAMERA") + CAM_HEIGHT, height)
+        s.write(s.resolve("CAMERA") + CAM_HEIGHT, height)
     if pitch is not None:
-        s.write(s.resolve("M7K_CAMERA") + CAM_PITCH, pitch & 0xFF)
+        s.write(s.resolve("CAMERA") + CAM_PITCH, pitch & 0xFF)
     # a frame can take two vblanks: wait out the pass that read the old
     # values, then a whole one with the new
     s.wait(6)
@@ -110,7 +110,7 @@ def floor(s):
 
 
 def camera(s):
-    return s.raw("M7K_CAMERA").bytes()
+    return s.raw("CAMERA").bytes()
 
 
 def bands(s):
@@ -169,7 +169,7 @@ def test_floor_tables(flyer):
     assert (f[F_SKY], f[F_GROUND], f[F_BUILT_HEIGHT]) == (sky, ground, 64)
     assert f[F_FOOT] == foot_of(64) == ground + PITCH_DOWN
     z = line_z(64)
-    assert words(f[F_LINE_Z:F_LINE_DIST], signed=False)[:len(z)] == z
+    assert list(f[F_LINE_Z:F_LINE_DIST])[:len(z)] == z
     assert words(f[F_LINE_DIST:F_LINE_DIST + 448], signed=False)[:len(z)] == line_dist(64)
 
     # lines 0..sky hold the top matrix; line sky + r reads row r

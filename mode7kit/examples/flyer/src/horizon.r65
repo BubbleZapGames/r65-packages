@@ -122,7 +122,7 @@ macro_rules! m7k_horizon($name:ident, $state:ident, $floor:ident, $bands:ident) 
             $bands::fill_back();
             let k: u16 = $bands::back_index() as u16;
             let cam: *M7Camera = $floor::camera();
-            $state.hofs[k] = (0 - ((cam.angle as u16) << 2)) & 0x03FF;
+            $state.hofs[k] = (0 - ((cam.heading as u16) << 2)) & 0x03FF;
             $state.vofs[k] = 240 - begin as u16;
         }
 

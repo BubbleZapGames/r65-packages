@@ -10,7 +10,7 @@ import io
 import pytest
 from PIL import Image
 
-CAM_X, CAM_Y, CAM_ANGLE = 0, 2, 4                     # M7Camera
+CAM_X, CAM_Y, CAM_HEADING = 0, 2, 4                     # M7Camera
 F_SKY, F_GROUND = 1, 2                                # M7Plain, FloorB
 H_BACK, H_HDMAEN = 9, 11                              # M7HDMA
 V_CTR, V_SCR, V_STRIDE = 37, 119, 41                  # M7Views (4 views)
@@ -29,7 +29,7 @@ def set_cam(s, name, x=None, y=None, angle=None):
     if y is not None:
         s.write(base + CAM_Y, (y << 6) & 0xFFFF, 2)
     if angle is not None:
-        s.write(base + CAM_ANGLE, angle & 0xFF)
+        s.write(base + CAM_HEADING, angle & 0xFF)
     s.wait(6)
 
 
@@ -60,7 +60,7 @@ def test_each_half_follows_its_camera(split, tmp_path):
     set_cam(s, "CAM_B", angle=128 + 40)
     top1, bottom1 = halves(s, tmp_path, "turn_b")
     assert top1 == top0 and bottom1 != bottom0
-    set_cam(s, "M7K_CAMERA", x=600, y=420)
+    set_cam(s, "CAMERA", x=600, y=420)
     top2, bottom2 = halves(s, tmp_path, "move_a")
     assert bottom2 == bottom1 and top2 != top1
 
@@ -77,7 +77,7 @@ def test_same_camera_same_picture(split, tmp_path):
     differently. Different headings don't come close."""
     s = split
     sky = sky_of(64) - 24
-    set_cam(s, "M7K_CAMERA", x=512, y=512, angle=30)
+    set_cam(s, "CAMERA", x=512, y=512, angle=30)
     set_cam(s, "CAM_B", x=512, y=512, angle=30)
     top, bottom = halves(s, tmp_path, "same")
     line = 256 * 3
@@ -108,7 +108,7 @@ def test_views(split):
     scroll is their own, the skies' puts a 240-line sky's bottom on the
     half's horizon."""
     s = split
-    set_cam(s, "M7K_CAMERA", x=512, y=512, angle=0)
+    set_cam(s, "CAMERA", x=512, y=512, angle=0)
     set_cam(s, "CAM_B", x=300, y=700, angle=64)
     v = s.raw("M7K_VIEWS").bytes()
     k = s.raw("M7K_HDMA").bytes()[H_BACK] ^ 1

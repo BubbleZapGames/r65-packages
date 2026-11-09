@@ -10,4 +10,4 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 @pytest.fixture(scope="session")
 def rom():
-    return Rom(Path(__file__).parent.parent / "build" / "PLANE.smc")
+    return Rom(Path(__file__).parent.parent / "build" / "PLAINROT.smc")

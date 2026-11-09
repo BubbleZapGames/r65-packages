@@ -9,16 +9,21 @@
 //! and so `Mode7`: it follows a camera, builds its rows into a transport
 //! (`m7k_hdma!`), and projects. It reads the camera's height and takes its
 //! pitch as a horizon shift in scanlines. The default instance is `M7Plain`
-//! (state `M7K_PLAIN`) over `M7HDMA`, the whole screen. Every instance
-//! follows `M7K_CAMERA` until its `set_camera`.
+//! (state `M7K_PLAIN`) over `M7HDMA`, the whole screen. It follows the
+//! camera its `setup` takes, the game's.
 //!
 //! ```
 //! include!("mode7kit/plain.r65")
 //!
-//! M7Plain::setup(M7Repeat::Wrap, M7Flip::None);    // force blank
+//! #[lowram]
+//! static mut CAMERA: M7Camera = M7Camera {
+//!     x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0,
+//! };
+//!
+//! M7Plain::setup(&CAMERA, M7Repeat::Wrap, M7Flip::None);    // force blank
 //! loop {
 //!     wait_nmi!();
-//!     M7K_CAMERA.set_height(height);
+//!     CAMERA.set_height(height);
 //!     M7Plain::update();
 //!     let sx, sy, size = M7Plain::to_screen(enemy_x, enemy_y);
 //! }
@@ -143,7 +148,7 @@ macro_rules! m7k_rows_mul_q($hstate:ident, $fstate:ident, $k:ident, $n:ident, $c
     let m7k_end: u16 = $k + ($n << 1);
     let mut m7k_l: u16 = 0;
     while m7k_k < m7k_end {
-        let z: u16 = $fstate.line_z[m7k_l];
+        let z: u16 = $fstate.line_z[m7k_l] as u16;
         WRMPY = z | $ch;
         NOP(4);
         let ma: i16 = (RDMPY >> 5) as i16;
@@ -163,10 +168,10 @@ macro_rules! m7k_rows_mul_q($hstate:ident, $fstate:ident, $k:ident, $n:ident, $c
 // THE FLOOR
 // ============================================================================
 
-/// `$name`, a floor following a camera (`M7K_CAMERA` until its
-/// `set_camera`), building its rows into transport `$hdma` (state
+/// `$name`, a floor following the camera its `setup` takes, building its
+/// rows into transport `$hdma` (state
 /// `$hstate`) with row builder `$rows` (`m7k_rows_mul`). Its state, the
-/// `#[ram]` static `$state`, takes 941 bytes.
+/// `#[ram]` static `$state`, takes 716 bytes.
 macro_rules! m7k_plain($name:ident, $state:ident, $hdma:ident, $hstate:ident, $rows:ident) {
     /// A floor's state.
     struct $name {
@@ -179,8 +184,7 @@ macro_rules! m7k_plain($name:ident, $state:ident, $hdma:ident, $hstate:ident, $r
         ground: u8,
         foot: u8,
         built_height: u8,
-        /// The last build's heading, for the projections.
-        angle: u8,
+        /// The last build's heading's sin and cos, for the projections.
         sin: i16,
         cos: i16,
         /// Depth of the last `to_screen` point, texels: sort objects by it.
@@ -193,7 +197,7 @@ macro_rules! m7k_plain($name:ident, $state:ident, $hdma:ident, $hstate:ident, $r
         /// Per ground line, counted down from the horizon: the depth scale
         /// z, and the forward distance (texels) the line's center shows.
         /// They depend on the height alone, not on the pitch.
-        line_z: [u16; 224],
+        line_z: [u8; 224],
         line_dist: [i16; 224],
         /// What each transport buffer holds of this floor, so a build that
         /// would write the same skips it: its rows' heading, line-table
@@ -221,18 +225,20 @@ macro_rules! m7k_plain($name:ident, $state:ident, $hdma:ident, $hstate:ident, $r
     #[ram]
     static mut $state: $name = $name {
         top: 0, sky: 0, ground: 0, foot: 0, built_height: 0xFF,
-        angle: 0, sin: 0, cos: 0x100, depth: 0,
+        sin: 0, cos: 0x100, depth: 0,
         cx: 0, cy: 0, hofs: 0, vofs: 0,
         line_z: [0; 224], line_dist: [0; 224],
         key_angle: [0, 0], key_gen: [0xFF, 0xFF], key_top: [0, 0], key_rows: [0, 0],
         key_stamp: [0, 0], key_sky: [0xFF, 0xFF], key_ground: [0, 0], key_tstamp: [0, 0],
-        camera: &M7K_CAMERA,
+        camera: 0 as *M7Camera,
         gen: 0, pivot: 0, reach: 0, key_tgen: [0xFF, 0xFF],
     };
 
     impl Mode7 for $name {
-        /// The transport's setup: BGMODE 7, M7SEL and the matrix channels.
-        fn setup(repeat: M7Repeat, flip: M7Flip) {
+        /// The transport's setup (BGMODE 7, M7SEL and the matrix
+        /// channels), following camera `cam`.
+        fn setup(cam: *M7Camera, repeat: M7Repeat, flip: M7Flip) {
+            $state.camera = cam;
             $hdma::setup(repeat, flip);
             $state.built_height = 0xFF;
             $state.key_gen[0] = 0xFF;
@@ -283,7 +289,7 @@ macro_rules! m7k_plain($name:ident, $state:ident, $hdma:ident, $hstate:ident, $r
             let mut x: i16 = sx;
             if $hstate.sel & 0x01 != 0 { x = 255 - x; }
             let l: u8 = (sy as u8) - $state.sky;
-            let z: u8 = $state.line_z[l as u16] as u8;
+            let z: u8 = $state.line_z[l as u16];
             // pixels × z/64 texels per pixel, in 10.6: pixels × z
             let xn, xm = m7k_abs(x - 128);
             if xm > 128 {
@@ -341,7 +347,7 @@ macro_rules! m7k_plain($name:ident, $state:ident, $hdma:ident, $hstate:ident, $r
                 if zi > M7K_ZRECIP_LAST { zi = M7K_ZRECIP_LAST; }
                 let z: u16 = M7K_ZRECIP[zi] as u16;
                 WRMPY = z | left;
-                $state.line_z[l] = z;
+                $state.line_z[l] = z as u8;
                 zr = zr + step;
                 left = left - 0x100;
                 $state.line_dist[l] = (RDMPY >> 6) as i16;

@@ -21,6 +21,12 @@ include!("horizon.r65")
 
 #[bank(0)]
 
+/// The game's camera, which the view follows (handed to its `setup`).
+#[lowram]
+static mut CAMERA: M7Camera = M7Camera {
+    x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0,
+};
+
 // ============================================================================
 // LAYOUT
 // ============================================================================
@@ -40,7 +46,7 @@ static OBJECT_X: [u16; 5] = [512, 560, 470, 600, 8];
 static OBJECT_Y: [u16; 5] = [400, 450, 470, 300, 512];
 
 /// The pad, and a frame counter. The view itself lives in mode7kit: the
-/// heading, height and pitch in `M7K_CAMERA`, where the tests write them.
+/// heading, height and pitch in `CAMERA`, where the tests write them.
 struct Game {
     frames: u16,
     pad: u16,
@@ -80,20 +86,20 @@ fn project_objects() {
 }
 
 fn update() {
-    if held(JOY_LEFT) { M7K_CAMERA.turn(2); }
-    if held(JOY_RIGHT) { M7K_CAMERA.turn(-2); }
-    let h: u8 = M7K_CAMERA.height();
-    if held(JOY_L) && h > 1 { M7K_CAMERA.set_height(h - 2); }
-    if held(JOY_R) && h < 126 { M7K_CAMERA.set_height(h + 2); }
-    let p: i8 = M7K_CAMERA.pitch();
-    if held(JOY_X) && p < M7K_PITCH_UP { M7K_CAMERA.set_pitch(p + 2); }
-    if held(JOY_B) && p > 0 - M7K_PITCH_DOWN { M7K_CAMERA.set_pitch(p - 2); }
+    if held(JOY_LEFT) { CAMERA.turn(2); }
+    if held(JOY_RIGHT) { CAMERA.turn(-2); }
+    let h: u8 = CAMERA.height();
+    if held(JOY_L) && h > 1 { CAMERA.set_height(h - 2); }
+    if held(JOY_R) && h < 126 { CAMERA.set_height(h + 2); }
+    let p: i8 = CAMERA.pitch();
+    if held(JOY_X) && p < M7K_PITCH_UP { CAMERA.set_pitch(p + 2); }
+    if held(JOY_B) && p > 0 - M7K_PITCH_DOWN { CAMERA.set_pitch(p - 2); }
     if pressed(JOY_START) {
         M7Plain::set_flip(M7Plain::flip().toggle_h());
     }
     // Up/Down along the heading, two texels a frame
-    if held(JOY_UP) { M7K_CAMERA.forward(128); }
-    if held(JOY_DOWN) { M7K_CAMERA.forward(-128); }
+    if held(JOY_UP) { CAMERA.forward(128); }
+    if held(JOY_DOWN) { CAMERA.forward(-128); }
     M7Plain::build(0, 224);
     Horizon::update();
     M7Plain::publish();
@@ -141,9 +147,9 @@ fn main() -> ! {
 
     Horizon::set_sky(BG::Mode1, 0x02, 0x01);              // Mode 1 sky: BG2; floor: BG1
     Horizon::set_haze(true);
-    M7Plain::setup(M7Repeat::Wrap, M7Flip::None);
+    M7Plain::setup(&CAMERA, M7Repeat::Wrap, M7Flip::None);
     Horizon::setup();
-    M7K_CAMERA.set(M7Coord::from_texel(512), M7Coord::from_texel(512));
+    CAMERA.set(M7Coord::from_texel(512), M7Coord::from_texel(512));
     NMITIMEN = Interrupt::Nmi as u8 | Interrupt::AutoJoy as u8;
 
     loop {

@@ -1,8 +1,8 @@
-# mode7kit plane example
+# mode7kit plain rotation example
 
-The flyer's view with a true pitch: mode7kit's `M7PlaneRotation` over its
+The flyer's view with a true pitch: mode7kit's `M7PlainRotation` over its
 transport `M7HDMA`, under a Mode 1 sky. The sky is the flyer's own code,
-copied into `src/` (`bands.r65`, `horizon.r65`): `Horizon` over the plane
+copied into `src/` (`bands.r65`, `horizon.r65`): `Horizon` over the plain
 instead of the floor. It reads the view only through `Mode7Scan`, so
 the swap is one name in `src/horizon.r65`.
 
@@ -17,11 +17,11 @@ down it is a flat map: one matrix for every line, so turning costs about
 what `M7Static` does.
 
 Five world points are projected each frame with
-`M7PlaneRotation::to_screen` into `OBJECT_SCREEN`, where the tests read
+`M7PlainRotation::to_screen` into `OBJECT_SCREEN`, where the tests read
 them. The ROM draws no sprites.
 
 ```bash
-make             # fetch dependencies (mode7kit by path, stdlib from git) and build build/PLANE.smc
+make             # fetch dependencies (mode7kit by path, stdlib from git) and build build/PLAINROT.smc
 pytest tests     # drive the ROM in Mesen-GDB (pip install -e Mesen-GDB/python)
 ```
 
@@ -30,7 +30,7 @@ The tests write the camera's heading, height and pitch and check:
   `line_z` and `line_dist`) against the same integer math in Python;
 - the rows' four products in every quadrant, and the pitch clamp at 6..64;
 - the single held row straight down;
-- `to_screen` against the plane's own tables exactly;
+- `to_screen` against the view's own tables exactly;
 - the picture and `to_screen` against an ideal ray-cast camera. At least
   85–99% of ground pixels must be within one texel, depending on the
   pitch; the error is the 8-bit depth scale.

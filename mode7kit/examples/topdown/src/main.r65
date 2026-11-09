@@ -17,12 +17,18 @@ include!("mode7kit/static.r65")
 
 #[bank(0)]
 
+/// The game's camera, which the view follows (handed to its `setup`).
+#[lowram]
+static mut CAMERA: M7Camera = M7Camera {
+    x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0,
+};
+
 // ============================================================================
 // STATE
 // ============================================================================
 
 /// The pad, and a frame counter. The view itself lives in mode7kit: the
-/// heading in `M7K_CAMERA`, the zoom in `M7K_STATIC`, where the tests write
+/// heading in `CAMERA`, the zoom in `M7K_STATIC`, where the tests write
 /// them.
 struct Game {
     frames: u16,
@@ -42,8 +48,8 @@ fn held(button: u16) -> bool {
 }
 
 fn update() {
-    if held(JOY_L) { M7K_CAMERA.turn(1); }
-    if held(JOY_R) { M7K_CAMERA.turn(-1); }
+    if held(JOY_L) { CAMERA.turn(1); }
+    if held(JOY_R) { CAMERA.turn(-1); }
     let zx, zy = M7Static::zoom();
     if held(JOY_A) && zx < 255 { M7Static::set_zoom(zx + 1, zy + 1); }
     if held(JOY_X) && zx > 16 { M7Static::set_zoom(zx - 1, zy - 1); }
@@ -51,10 +57,10 @@ fn update() {
     if held(JOY_Y) && zy2 < 255 { M7Static::set_zoom(zx2, zy2 + 1); }
     if held(JOY_B) && zy2 > 16 { M7Static::set_zoom(zx2, zy2 - 1); }
     // Up/Down along the heading, Left/Right across it, two texels a frame
-    if held(JOY_UP) { M7K_CAMERA.forward(128); }
-    if held(JOY_DOWN) { M7K_CAMERA.forward(-128); }
-    if held(JOY_RIGHT) { M7K_CAMERA.strafe(128); }
-    if held(JOY_LEFT) { M7K_CAMERA.strafe(-128); }
+    if held(JOY_UP) { CAMERA.forward(128); }
+    if held(JOY_DOWN) { CAMERA.forward(-128); }
+    if held(JOY_RIGHT) { CAMERA.strafe(128); }
+    if held(JOY_LEFT) { CAMERA.strafe(-128); }
     M7Static::update();
 }
 
@@ -86,9 +92,9 @@ fn main() -> ! {
     CGDATA = 0xF1;
     CGDATA = 0x76;
 
-    M7Static::setup(M7Repeat::Wrap, M7Flip::None);
+    M7Static::setup(&CAMERA, M7Repeat::Wrap, M7Flip::None);
     TM = 0x01;                       // BG1
-    M7K_CAMERA.set(M7Coord::from_texel(512), M7Coord::from_texel(512));
+    CAMERA.set(M7Coord::from_texel(512), M7Coord::from_texel(512));
     NMITIMEN = Interrupt::Nmi as u8 | Interrupt::AutoJoy as u8;
 
     loop {

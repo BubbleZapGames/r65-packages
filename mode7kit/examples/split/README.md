@@ -6,7 +6,7 @@ two mode7kit floor instances, with per-line bands of its own
 (`src/bands.r65`). mode7kit has no bands or split screen of its own; see
 [How the split is built](#how-the-split-is-built).
 
-- The default floor `M7Plain` follows `M7K_CAMERA` in the top half; a
+- The default floor `M7Plain` follows the example's `CAMERA` in the top half; a
   second instance, `FloorB` (`m7k_plain!`), follows `CAM_B`
   (`FloorB::set_camera(&CAM_B)`) in the bottom.
 - `Bands4` (`m7k_bands!`, four bands, no COLDATA) gives each half a Mode 1

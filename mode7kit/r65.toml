@@ -1,6 +1,6 @@
 [package]
 name        = "mode7kit"
-version     = "0.1.0"
+version     = "0.2.0"
 r65-version = "0.3"
 cfg         = ["snes"]
 

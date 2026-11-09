@@ -22,6 +22,12 @@ include!("mode7kit/static.r65")
 
 #[bank(0)]
 
+/// The game's camera, which the view follows (handed to its `setup`).
+#[lowram]
+static mut CAMERA: M7Camera = M7Camera {
+    x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0,
+};
+
 // ============================================================================
 // LAYOUT
 // ============================================================================
@@ -337,7 +343,7 @@ fn main() -> ! {
     M7K_DMA[1].a1b = 0x00;                // low RAM
     HDMAEN = 0x02;
 
-    M7Static::setup(M7Repeat::Transparent, M7Flip::None);
+    M7Static::setup(&CAMERA, M7Repeat::Transparent, M7Flip::None);
     TM = 0x11;                            // BG1 and sprites
     place();
     NMITIMEN = Interrupt::Nmi as u8 | Interrupt::AutoJoy as u8;

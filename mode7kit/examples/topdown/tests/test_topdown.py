@@ -15,7 +15,7 @@ from pathlib import Path
 S_SEL, S_A, S_B, S_C, S_D = 0, 1, 3, 5, 7          # M7Static
 S_IA, S_IB, S_IC, S_ID = 9, 11, 13, 15
 S_ZX, S_ZY = 27, 28
-CAM_ANGLE = 4                                       # M7Camera
+CAM_HEADING = 4                                       # M7Camera
 ASM = Path(__file__).parent.parent / "build" / "main.asm"
 
 def s16(v):
@@ -52,7 +52,7 @@ def q8(m, k):
 
 def set_view(s, angle=None, zx=None, zy=None):
     if angle is not None:
-        s.write(s.resolve("M7K_CAMERA") + CAM_ANGLE, angle & 0xFF)
+        s.write(s.resolve("CAMERA") + CAM_HEADING, angle & 0xFF)
     if zx is not None:
         s.write(s.resolve("M7K_STATIC") + S_ZX, zx)
     if zy is not None:
@@ -65,12 +65,12 @@ def state(s):
 
 
 def angle(s):
-    return s.raw("M7K_CAMERA").bytes()[CAM_ANGLE]
+    return s.raw("CAMERA").bytes()[CAM_HEADING]
 
 
 def camera(s):
-    """M7K_CAMERA's x, y (10.6, unsigned)."""
-    return words(s.raw("M7K_CAMERA").bytes()[:4], signed=False)
+    """CAMERA's x, y (10.6, unsigned)."""
+    return words(s.raw("CAMERA").bytes()[:4], signed=False)
 
 
 @pytest.fixture
