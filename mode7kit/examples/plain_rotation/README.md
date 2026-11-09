@@ -25,11 +25,15 @@ make             # fetch dependencies (mode7kit by path, stdlib from git) and bu
 pytest tests     # drive the ROM in Mesen-GDB (pip install -e Mesen-GDB/python)
 ```
 
-The tests write the camera's heading, height and pitch and check:
+The tests write the camera's heading, scales, height and pitch and check:
 - the line tables (the first ground line, the point under the camera,
-  `line_z` and `line_dist`) against the same integer math in Python;
-- the rows' four products in every quadrant, and the pitch clamp at 6..64;
-- the single held row straight down;
+  `line_z` and `line_dist`) against the same integer math in Python, at
+  altitudes from the height and scale_y's whole range and past its
+  clamps;
+- the rows' four products in every quadrant, equal and stretched, and the
+  pitch clamp at 6..64;
+- the single held row straight down, and at height 128 that it is
+  `M7Static`'s matrix for equal and stretched scales;
 - `to_screen` against the view's own tables exactly;
 - the picture and `to_screen` against an ideal ray-cast camera. At least
   85–99% of ground pixels must be within one texel, depending on the

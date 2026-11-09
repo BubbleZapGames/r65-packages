@@ -27,9 +27,7 @@
 //! include!("mode7kit/static.r65")
 //!
 //! #[lowram]
-//! static mut CAMERA: M7Camera = M7Camera {
-//!     x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0,
-//! };
+//! static mut CAMERA: M7Camera = m7k_camera(512, 512);
 //!
 //! M7Static::setup(&CAMERA, M7Repeat::Wrap, M7Flip::None);   // force blank
 //! loop {
@@ -222,25 +220,61 @@ const M7K_PITCH_MIN: i8 = -32;
 const M7K_PITCH_MAX: i8 = 64;
 
 /// A world camera: the point a view is built around, the way it faces
-/// (256 per turn; 0 looks toward -Y), its height and its pitch. The game
-/// declares its cameras, as `#[lowram] static mut` (a view keeps a near
-/// pointer), and gives each view one at its `setup`; `set_camera` changes
-/// it later. Two views may share one.
+/// (256 per turn; 0 looks toward -Y), its scales, its height and its
+/// pitch. The game declares its cameras, as `#[lowram] static mut` (a view
+/// keeps a near pointer), and gives each view one at its `setup`;
+/// `set_camera` changes it later. Two views may share one.
 ///
-/// Each view reads the height and the pitch its own way: `M7Plain` takes
-/// the pitch as its horizon shift in scanlines (positive looks up),
-/// `M7PlainRotation` as an angle (0 level, 64 straight down). `M7Static`
-/// reads neither.
+/// The scales zoom the picture on each screen axis, in the unit of a
+/// matrix's zoom: 64 is 1×, 128 magnifies 2×, 16 shrinks to ¼×, so
+/// stepping one by one zooms smoothly. Unequal, they stretch: (56, 64)
+/// makes a texel square on the SNES's 8:7 pixels. The height is the
+/// camera's, in texels above the plane. Each view reads what it needs:
+///
+/// - `M7Static` builds its matrix from the scales as they are, and has no
+///   height: it ignores it, as it ignores the pitch.
+/// - A perspective view flies at H = height · 64 / scale_y texels: zooming
+///   the world in by k shows what a camera k times lower sees, so a scale
+///   zooms it as it zooms `M7Static`. The lateral axis stretches by
+///   scale_y / scale_x, clamped to ½..2. Both divide, so a view computes
+///   them only when the scales or the height change, as it rebuilds its
+///   line tables or rows then anyway. Each clamps H to what its tables
+///   hold: `M7PlainRotation` 40..248, `M7Plain` 40..103.
+///
+/// At height 128 a straight-down `M7PlainRotation` shows `M7Static`'s
+/// picture for the same scales.
+///
+/// The pitch is a view's own: `M7Plain` takes it as its horizon shift in
+/// scanlines (positive looks up), `M7PlainRotation` as an angle (0 level,
+/// 64 straight down), and `M7Static` ignores it.
 struct M7Camera {
     /// Where it stands on the plane.
     x: M7Coord,
     y: M7Coord,
     /// The heading: 256 a turn, 0 looks toward -Y.
     heading: u8,
-    /// Height above the plane, 0..127.
+    /// The zoom on each screen axis: 64 is 1×, higher is closer.
+    scale_x: u8,
+    scale_y: u8,
+    /// Texels above the plane.
     height: u8,
     /// Pitch, `M7K_PITCH_MIN..M7K_PITCH_MAX`.
     pitch: i8,
+}
+
+/// A camera at texel (`x`, `y`), facing heading 0 (-Y), at scales 64, 64
+/// (1×), height 128 and pitch 0: a static's initializer in one call.
+///
+/// ```
+/// #[lowram]
+/// static mut CAMERA: M7Camera = m7k_camera(512, 512);
+/// ```
+const fn m7k_camera(x: u16, y: u16) -> M7Camera {
+    let c: M7Camera = M7Camera {
+        x: M7Coord(x << 6), y: M7Coord(y << 6), heading: 0,
+        scale_x: 64, scale_y: 64, height: 128, pitch: 0,
+    };
+    return c;
 }
 
 impl M7Camera {
@@ -270,12 +304,24 @@ impl M7Camera {
         self.heading = self.heading + d as u8;
     }
 
-    /// Sets the height above the plane, 0..127 (a view clamps higher).
+    /// Sets the zoom on each screen axis: 64 is 1×, higher is closer.
+    fn set_scale(*self, x: u8, y: u8) {
+        self.scale_x = x;
+        self.scale_y = y;
+    }
+
+    /// The zoom on each screen axis.
+    fn scale(*self) -> u8, u8 {
+        return self.scale_x, self.scale_y;
+    }
+
+    /// Sets the height above the plane, in texels (a perspective view
+    /// clamps it to its own range).
     fn set_height(*self, h: u8) {
         self.height = h;
     }
 
-    /// The height above the plane.
+    /// The height above the plane, in texels.
     fn height(*self) -> u8 {
         return self.height;
     }
@@ -305,25 +351,31 @@ impl M7Camera {
         self.y = self.y + dy as u16;
     }
 
-    /// Moves `speed` 1/64 texels along the heading (±255); negative moves
-    /// back.
+    /// Moves `speed` 1/64 texels along the heading; negative moves back.
     fn forward(*self, speed: i16) {
         self.step(self.heading, speed);
     }
 
     /// Moves `speed` 1/64 texels across the heading, toward the screen's
-    /// right (±255); negative moves left.
+    /// right; negative moves left.
     fn strafe(*self, speed: i16) {
         self.step(self.heading - 64, speed);
     }
 
-    /// `speed` along `angle`, the negative way round by a half turn.
+    /// `speed` along `angle`, the negative way round by a half turn, in
+    /// steps of at most 255 (`m7k_heading` takes a byte): a speed above
+    /// 255 moves its full distance, not its low byte's.
     fn step(*self, angle: u8, speed: i16) {
         let mut a: u8 = angle;
-        let mut s: i16 = speed;
-        if s < 0 {
+        let neg, mag = m7k_abs(speed);
+        let mut s: u16 = mag;
+        if neg {
             a = a + 128;
-            s = 0 - s;
+        }
+        while s > 255 {
+            let sx, sy = m7k_heading(a, 255);
+            self.move_by(sx, sy);
+            s = s - 255;
         }
         let dx, dy = m7k_heading(a, s as u8);
         self.move_by(dx, dy);
@@ -374,7 +426,7 @@ trait Mode7 {
     fn setup(cam: *M7Camera, repeat: M7Repeat, flip: M7Flip);
 
     /// The camera `update` builds from, from then on, in place of the one
-    /// `setup` took. The view keeps the pointer, not a copy: moving the
+    /// `setup` took. Until a view has a camera, its `update` does nothing. The view keeps the pointer, not a copy: moving the
     /// camera moves the view.
     fn set_camera(cam: *M7Camera);
 
@@ -480,7 +532,8 @@ trait Mode7Scan: Mode7 {
 // screen line the matrix pivots on), `sin`, `cos`, `depth`, `cx`,
 // `cy`, `hofs`, `vofs`, `line_z` (`u8`), `line_dist` (`i16`, falling from the
 // horizon down, but for a texel of the 8-bit z's rounding), `reach` (the
-// cull distance, texels), `gen` (bumped by a table rebuild), `camera`,
+// cull distance, texels), `gen` (bumped by a table or stretch change),
+// `lat_px` (the lateral stretch in pixels per texel, 8.8), `camera`,
 // and per transport buffer the keys `key_angle`, `key_gen`, `key_top`,
 // `key_rows`, `key_stamp`, `key_sky`, `key_ground`, `key_tstamp` and
 // `key_tgen`. Their locals are prefixed `m7k_`: R65 macros have no hygiene.
@@ -516,7 +569,9 @@ macro_rules! m7k_scan_to_screen($state:ident, $hstate:ident, $x:expr, $y:expr) {
         let m7k_mid: u16 = (m7k_lo + m7k_hi) >> 1;
         if $state.line_dist[m7k_mid] > m7k_f { m7k_lo = m7k_mid + 1; } else { m7k_hi = m7k_mid; }
     }
-    let m7k_size: u16 = m7k_recip($state.line_z[m7k_lo] as u8);
+    // pixels per texel across: the line's, stretched by the scales' ratio
+    let mut m7k_size: u16 = m7k_recip($state.line_z[m7k_lo] as u8);
+    if $state.lat_px != 0x100 { m7k_size = m7k_stretch(m7k_size, $state.lat_px); }
     let m7k_rn, m7k_rm = m7k_abs(m7k_r);
     let m7k_olo, m7k_ohi = mul16_wide(m7k_rm, m7k_size);
     let mut m7k_off: i16 = ((m7k_ohi << 8) | (m7k_olo >> 8)) as i16;
@@ -562,6 +617,18 @@ macro_rules! m7k_scan_build_rows($state:ident, $hdma:ident, $hstate:ident, $rows
     $state.vofs = m7k_cy - $state.pivot;
 }
 
+/// A scan view's lateral stretch for camera scales `$sx`, `$sy`
+/// (`m7k_lateral`) into its state's `lat` and `lat_px`. A new stretch
+/// bumps `gen`, so the rows' keys miss.
+macro_rules! m7k_scan_stretch($state:ident, $sx:expr, $sy:expr) {
+    let m7k_q, m7k_p = m7k_lateral($sx, $sy);
+    if m7k_q != $state.lat {
+        $state.lat = m7k_q;
+        $state.lat_px = m7k_p;
+        $state.gen = $state.gen + 1;
+    }
+}
+
 /// `publish`'s body for scan view `$name` (state `$state`) on transport
 /// `$hdma`: the top matrix down to the horizon, then the view's own
 /// `segment`, unless the back buffer's tables already hold that layout.
@@ -583,6 +650,61 @@ macro_rules! m7k_scan_publish($name:ident, $state:ident, $hdma:ident) {
         $state.key_ground[m7k_kb] = m7k_ground;
         $state.key_tstamp[m7k_kb] = m7k_stamp;
         $state.key_tgen[m7k_kb] = m7k_gen;
+    }
+}
+
+/// A perspective view's rows from four 1.7 factors on the hardware
+/// multiplier: `$n` rows into transport state `$hstate` from element `$k`,
+/// z = `$fstate.line_z[l]`. The lateral factors `$lc`, `$ls` make A and C,
+/// the forward `$fc`, `$fs` D and B; `$neg_c` and `$neg_s` are the heading's
+/// cos and sin signs. Each product is >> 5. WRMPYA keeps z, so each product
+/// after the first is one WRMPYB store; one loop per sign quadrant, so a
+/// row applies no sign masks.
+macro_rules! m7k_rows4($hstate:ident, $fstate:ident, $k:expr, $n:expr, $lc:ident, $ls:ident, $fc:ident, $fs:ident, $neg_c:expr, $neg_s:expr) {
+    let m7k_lc_hi: u16 = $lc << 8;
+    let m7k_k0: u16 = $k;
+    let m7k_n: u16 = $n;
+    if $neg_c {
+        if $neg_s {
+            m7k_rows4_q!($hstate, $fstate, m7k_k0, m7k_n, m7k_lc_hi, $ls, $fc, $fs, 0 - la, 0 - fb, lb, 0 - fa);
+        } else {
+            m7k_rows4_q!($hstate, $fstate, m7k_k0, m7k_n, m7k_lc_hi, $ls, $fc, $fs, 0 - la, fb, 0 - lb, 0 - fa);
+        }
+    } else {
+        if $neg_s {
+            m7k_rows4_q!($hstate, $fstate, m7k_k0, m7k_n, m7k_lc_hi, $ls, $fc, $fs, la, 0 - fb, lb, fa);
+        } else {
+            m7k_rows4_q!($hstate, $fstate, m7k_k0, m7k_n, m7k_lc_hi, $ls, $fc, $fs, la, fb, 0 - lb, fa);
+        }
+    }
+}
+
+/// One quadrant's loop: A = `$xa`, B = `$xb`, C = `$xc`, D = `$xd`, from
+/// the lateral products `la`, `lb` and the forward ones `fa`, `fb`.
+macro_rules! m7k_rows4_q($hstate:ident, $fstate:ident, $k:ident, $n:ident, $lc:ident, $ls:ident, $fc:ident, $fs:ident, $xa:expr, $xb:expr, $xc:expr, $xd:expr) {
+    let mut m7k_k: u16 = $k;
+    let m7k_end: u16 = $k + ($n << 1);
+    let mut m7k_l: u16 = 0;
+    while m7k_k < m7k_end {
+        let z: u16 = $fstate.line_z[m7k_l] as u16;
+        WRMPY = z | $lc;
+        NOP(4);
+        let la: i16 = (RDMPY >> 5) as i16;
+        M7K_WRMPYB = $ls;
+        NOP(4);
+        let lb: i16 = (RDMPY >> 5) as i16;
+        M7K_WRMPYB = $fc;
+        NOP(4);
+        let fa: i16 = (RDMPY >> 5) as i16;
+        M7K_WRMPYB = $fs;
+        NOP(4);
+        let fb: i16 = (RDMPY >> 5) as i16;
+        $hstate.ab[m7k_k] = $xa;
+        $hstate.ab[m7k_k + 1] = $xb;
+        $hstate.cd[m7k_k] = $xc;
+        $hstate.cd[m7k_k + 1] = $xd;
+        m7k_k = m7k_k + 2;
+        m7k_l++;
     }
 }
 
@@ -677,6 +799,32 @@ fn m7k_mul_q8(m: u16, k: u16) -> u16 {
     let r: u16 = hi + lo;
     if r > 0x7FFF { return 0x7FFF; }
     return r;
+}
+
+/// (v · q) >> 8 for any u16 v and q, saturating at 0x7FFF: a lateral
+/// stretch (8.8, up to 2.0) applied to a factor, a size or an offset.
+fn m7k_stretch(v: u16, q: u16) -> u16 {
+    let lo, hi = mul16_wide(v, q);
+    if hi >= 0x80 { return 0x7FFF; }
+    return (hi << 8) | (lo >> 8);
+}
+
+/// A perspective view's lateral stretch for scales `sx`, `sy`: texels per
+/// pixel across, scale_y / scale_x, and its inverse, pixels per texel,
+/// both 8.8. `sx` is clamped to just over half and at most twice `sy`, so
+/// the first is below 2.0 and a row's lateral factor (at most 128 times
+/// it) still fits a byte.
+fn m7k_lateral(sx: u8, sy: u8) -> u16, u16 {
+    let mut y: u16 = sy as u16;
+    if y == 0 { y = 1; }
+    let mut x: u16 = sx as u16;
+    let lo: u16 = (y >> 1) + 1;
+    let mut hi: u16 = y << 1;
+    if hi > 255 { hi = 255; }
+    if x < lo { x = lo; }
+    if x > hi { x = hi; }
+    if x == y { return 0x100, 0x100; }
+    return div16(y << 8, x as u8), div16(x << 8, y as u8);
 }
 
 /// Signed (m · k) >> 8: m is a sin/cos value (|m| ≤ 256), k an unsigned

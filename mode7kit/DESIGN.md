@@ -51,8 +51,8 @@ core.r65 ◄─┬─ static.r65                         M7Static
 | core | `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Repeat`, `M7Flip`, `m7k_sin/cos`, `m7k_heading`, `m7k_recip`, `M7Camera`, register writers, the DMA channel array, the multiplies, uploads | none: the game declares its cameras | | 640 B (sin/cos), 512 B (reciprocal), 2321 B (`M7K_ZRECIP`, for a per-line view) | none (7 B a game camera) |
 | flat view | `static.r65` | `M7Static` | `M7K_STATIC` | yes | code | 31 B |
 | transport | `hdma.r65` | `m7k_hdma!`: per-line matrices, double buffer, indirect tables, M7SEL and the view, HDMAEN; the HDMA table writers | `M7HDMA` (224 lines, ch 2–3) | no | code | 16·lines + 151 B an instance (3735 B for `M7HDMA`) |
-| floor | `plain.r65` | `m7k_plain!`: a camera's perspective floor in a transport, its projections | `M7Plain` | yes, and `Mode7Scan` | 640 B | 716 B |
-| plain rotation | `plain_rotation.r65` | `m7k_plain_rotation!`: the plain at a true pitch angle, its projections | `M7PlainRotation` | yes, and `Mode7Scan` | none | 722 B |
+| floor | `plain.r65` | `m7k_plain!`: a camera's perspective floor in a transport, its projections | `M7Plain` | yes, and `Mode7Scan` | 640 B | 723 B |
+| plain rotation | `plain_rotation.r65` | `m7k_plain_rotation!`: the plain at a true pitch angle, its projections | `M7PlainRotation` | yes, and `Mode7Scan` | none | 729 B |
 
 A game includes the file of the view it uses:
 
@@ -345,13 +345,15 @@ that difference.
 ### The world camera
 
 ```rust
-struct M7Camera { x: M7Coord, y: M7Coord, heading: u8, height: u8, pitch: i8 }
+struct M7Camera {
+    x: M7Coord, y: M7Coord, heading: u8,
+    scale_x: u8, scale_y: u8, height: u8, pitch: i8,
+}
 
-// the game's
+// the game's: m7k_camera(x, y) is that literal, at texel (x, y), facing
+// heading 0, at scales 64, 64 (1×), height 128 and pitch 0
 #[lowram]
-static mut CAMERA: M7Camera = M7Camera {
-    x: M7Coord(512 << 6), y: M7Coord(512 << 6), heading: 0, height: 64, pitch: 0,
-};
+static mut CAMERA: M7Camera = m7k_camera(512, 512);
 M7Plain::setup(&CAMERA, M7Repeat::Wrap, M7Flip::None);
 ```
 
@@ -363,17 +365,56 @@ The methods take `*self`, so a game may have several cameras
 | `set(x: M7Coord, y: M7Coord)`, `get()` | Position |
 | `set_heading(h: u8)`, `heading()` | Heading, 256 per turn; 0 looks toward −Y |
 | `turn(d: i8)` | Adds to the heading |
-| `set_height(h: u8)`, `height()` | Height above the plane, 0..127 |
-| `set_pitch(p: i8)`, `pitch()`, `tilt(d: i8)` | Pitch, −32..64 (`tilt` keeps it there). Each view reads it its own way: `M7Plain` as a horizon shift in scanlines (positive looks up), `M7PlainRotation` as an angle (6..64, 64 straight down). `M7Static` ignores height and pitch. |
-| `forward(speed: i16)` | Moves `speed` 1/64 texels along the heading (`m7k_heading`); negative moves back |
+| `set_scale(x: u8, y: u8)`, `scale()` | The zoom on each screen axis, in the matrix zoom's unit: 64 is 1×, higher is closer (below) |
+| `set_height(h: u8)`, `height()` | Texels above the plane, for the perspective views (below) |
+| `set_pitch(p: i8)`, `pitch()`, `tilt(d: i8)` | Pitch, −32..64 (`tilt` keeps it there). Each view reads it its own way: `M7Plain` as a horizon shift in scanlines (positive looks up), `M7PlainRotation` as an angle (6..64, 64 straight down). `M7Static` ignores the pitch. |
+| `forward(speed: i16)` | Moves `speed` 1/64 texels along the heading (`m7k_heading`, in steps of at most 255, so any `i16` moves its full distance); negative moves back |
 | `strafe(speed: i16)` | Moves across the heading, toward the screen's right (`m7k_heading(angle − 64)`); negative moves left |
 | `move_by(dx: i16, dy: i16)` | Adds a 10.6 delta. Wraps for free. |
 
+**Scales and a height.** The camera holds what each view reads, in the
+form it can use with the least work. `M7Static` builds a matrix every
+`update()` and has no height, so the scales are its matrix zooms as they
+are, through `M7K_RECIP`: no conversion, and a stretch for free. A
+perspective view needs an altitude and a lateral stretch:
+
+- **H = height · 64 / scale_y** texels. This is the pinhole identity:
+  zooming the world in by k around the point under the camera shows what
+  a camera k times lower sees, so a scale zooms a perspective view as it
+  zooms `M7Static`, and the height is its own knob on top.
+- **q = scale_y / scale_x** (8.8) stretches the lateral factors, A and C,
+  and **p = scale_x / scale_y** the projections' lateral sizes and
+  offsets. `m7k_lateral` clamps scale_x to just over half and at most
+  twice scale_y, so q < 2 and a lateral factor, at most 128·q, fits its
+  byte.
+
+Both divide (`div16`), so a view computes them only when a scale or the
+height changes; it rebuilds its line tables or rows then anyway, and each
+frame it compares three bytes with the ones it built for. A new stretch
+bumps `gen`, so the rows' keys miss. At height 128 a straight-down
+`M7PlainRotation` shows `M7Static`'s picture for the same scales (a test
+checks it to within z's rounding).
+
+Each perspective view clamps H to the altitudes its tables hold.
+`M7Plain`'s 128 floor heights are H = 40 + h/2, 40..103.5 texels, and
+`m7k_row_height(height, sy)` is h = height · 128 / sy − 80, clamped.
+`M7PlainRotation` takes H itself, 40..248: under 40 the near lines' depth
+scale runs past `M7K_ZRECIP`, and over 248 it nears a byte's end.
+
+A stretch costs `M7Plain` more. Its rows share one product between A and
+D (A = D, C = −B), two products a row; unequal scales make A ≠ D, so a
+stretched floor takes `core.r65`'s four-product rows (`m7k_rows4!`, the
+plain rotation's loop at sin θ = 1), chosen once a build, and the
+two-product loops stay for equal scales. `M7PlainRotation` already takes
+four products a row; the stretch only scales its two lateral factors,
+once a build.
+
 **The game owns the cameras.** `Mode7::setup(cam, repeat, flip)` takes
 one, so a view can't be set up without it: forgetting is a compile error,
-not a read through a null pointer. (A view's state starts with a 0
-pointer, which only an `update` before `setup` would follow.)
-`set_camera(&cam)` swaps it later. Two views set up with one camera show
+not a read through a null pointer.
+`set_camera(&cam)` swaps it later. A view's `update` (and a scan view's
+`build`) does nothing until it has a camera, so a view used before its
+`setup` stays blank instead of reading a camera from $0000. Two views set up with one camera show
 the same place, so switching between `M7Static` and a floor keeps the
 view where it was. A view keeps
 the pointer in its state, not a copy, so the game moves the camera and the
@@ -429,7 +470,8 @@ struct M7Static {
     ia: i16, ib: i16, ic: i16, id: i16,     // the inverse, for the projections
     cx: u16, cy: u16, hofs: u16, vofs: u16,
     px: u8, py: u8,                         // the pixel the camera is pinned to
-    zx: u8, zy: u8,                         // zoom, 64 = 1.0
+    zoom: u8,                               // the last matrix's horizontal zoom, 64 = 1.0
+    camera: *M7Camera,
 }
 #[lowram]
 static mut M7K_STATIC: M7Static = /* identity, center (128, 112), zoom 64 */;
@@ -444,10 +486,11 @@ simply doesn't project.
 | Function | Does |
 |---|---|
 | `setup(cam, repeat, flip)` | Follows `cam`; BGMODE = 7, and M7SEL with its copy. Call in force blank, or in vblank when switching modes. The game still owns TM. |
-| `update()` | `rotate_scale(camera angle, zx, zy)`, then pins the camera's texel to `(px, py)`: center = camera, hofs = cx − px, vofs = cy − py. |
+| `update()` | `rotate_scale(heading, scale_x, scale_y)` with the camera's scales, then pins the camera's texel to `(px, py)`: center = camera, hofs = cx − px, vofs = cy − py. |
 | `nmi()` | `m7k_write_matrix`, then `m7k_write_view`. Never writes HDMAEN. |
-| `to_screen`, `to_world` | The flat projection below. `size` is `zx << 2`, the horizontal texel size; sy is never `M7K_HIDDEN`. |
-| `set_zoom(zx, zy)`, `zoom()`, `set_pivot(sx, sy)` | Properties `update()` reads |
+| `to_screen`, `to_world` | The flat projection below. `size` is `zoom << 2`, the horizontal texel size; sy is never `M7K_HIDDEN`. |
+| `set_pivot(sx, sy)` | The pixel `update()` pins the camera to |
+| `zoom()` | The horizontal zoom of the last matrix built (`update`, `scale`, `rotate_scale`, `identity`) |
 | `rotate(angle)`, `scale(zx, zy)`, `rotate_scale(angle, zx, zy)`, `identity()`, `set_matrix(a, b, c, d)`, `set_inverse(ia, ib, ic, id)`, `set_center(cx, cy, hofs, vofs)` | Manual control, for a game that doesn't call `update()` |
 
 **No HDMA.** Static mode never writes HDMAEN or any DMA register: a Static
@@ -469,14 +512,20 @@ A = cos, B = sin, C = −sin, D = cos rotates the view around (X0, Y0), which
 cos, ib = −sin, ic = sin. `scale` is A = T[zx], D = T[zy], B = C = 0, with
 ia = zx << 2, id = zy << 2 (zoom/64 in 8.8). Neither multiplies.
 
-`zx` scales the **horizontal screen axis** and `zy` the **vertical**. In
+`update()` zooms by the camera's scales, `scale_x` as `zx` and `scale_y`
+as `zy`.
+
+The manual setters take a zoom per axis: `zx` scales the **horizontal
+screen axis** and `zy` the **vertical**. In
 the matrix, A and C are the texel step per screen pixel in x, and B and D
 the step per screen line. A uniform zoom passes the same value twice.
 Unequal values give:
 
 - squash and stretch effects;
-- pixel-aspect correction. SNES pixels are 8:7, so `set_zoom(64, 56)` makes
-  a square texel look square on a 4:3 display;
+- pixel-aspect correction. SNES pixels are 8:7, wider than tall, so
+  `rotate_scale(a, 56, 64)` (or the camera's `set_scale(56, 64)`) shrinks
+  the horizontal axis and makes a square texel look square on a 4:3
+  display;
 - a pseudo-tilt: a smaller `zy` foreshortens the plane vertically. This is
   a cheap stand-in for a top-down camera tilted back, without the per-line
   cost of perspective.
@@ -692,14 +741,14 @@ the same:
 
 | Part | Key per buffer | Kept by |
 |---|---|---|
-| a floor's rows | heading, height, band top, rows built, the transport's stamp | the floor |
+| a floor's rows | heading, line-table generation, band top, rows built, the transport's stamp | the floor |
 | a floor's tables | horizon, ground lines, stamp | the floor (`finish_same`) |
 
 The two buffers alternate, so a change rebuilds two frames in a row, and a
 steady view then costs the comparisons. A custom `publish` and `setup`
 bump the stamp, so a floor never keeps rows a game wrote over. Flying
-straight changes no row: the rows depend on the heading and the height,
-and translation moves only the view.
+straight changes no row: the rows depend on the heading and the line
+tables and the stretch, and translation moves only the view.
 
 ### The per-line layer
 
@@ -748,9 +797,8 @@ dizworld:
 
 ```rust
 struct $name {
-    height: u8, pitch: i8,                  // properties
     top: u8, sky: u8, ground: u8,           // the last build's band top, horizon (screen line), ground lines
-    foot: u8, built_height: u8,             // the line tables' foot and height
+    foot: u8, built_sy: u8,                 // the line tables' foot and camera scale_y (0: none)
     sin: i16, cos: i16,                     // the last build's heading
     depth: i16,                             // the last projected point's
     cx: u16, cy: u16, hofs: u16, vofs: u16, // the last build's view
@@ -758,9 +806,13 @@ struct $name {
     key_*: [u8; 2],                         // per buffer: see Build keys
     camera: *M7Camera,
     gen: u8, pivot: u16, reach: u16,        // table rebuilds, the pivot line, the cull distance
+    key_tgen: [u8; 2],
+    row: u8,                                // the line tables' floor height, 0..127
+    built_sx: u8, built_h: u8,              // the camera's scale_x and height, as last read
+    lat: u16, lat_px: u16,                  // the lateral stretch, texels/pixel and its inverse (8.8)
 }
 #[ram]
-static mut $state: $name = /* height 64, pitch 0 */;
+static mut $state: $name = /* no tables built */;
 ```
 
 | Function | Does |
@@ -771,13 +823,13 @@ static mut $state: $name = /* height 64, pitch 0 */;
 | `nmi()` | The transport's `commit()` |
 | `to_screen`, `to_world` | The floor projection, [below](#world-projection) |
 | `sel()`, `set_sel()` | The transport's |
-| (the camera's height and pitch) | Read by the build, which clamps them to 0..127 and −32..64 |
+| (the camera's scales, height and pitch) | Read by the build. The floor height (`m7k_row_height`, clamped to 0..127) and the stretch (`m7k_lateral`) divide, so the build computes them only when the scales or the height change, and rebuilds the tables only when the floor height does; the pitch is clamped to −32..64 |
 | `depth()` | The last projected point's depth |
 | `begin()`, `end()`, `center()`, `scroll()` | `Mode7Scan`: the last build's rows (horizon to band bottom) and view |
 | `build(top, lines)` | `Mode7Scan`: the band of `lines` lines from screen line `top`: its rows, from row `top`, and its view; no publishing |
 | `publish()` | `Mode7Scan`: a full-screen frame of the last build: the top matrix down to the horizon, then the rows |
 | `commit() -> bool, u8` | `Mode7Scan`: the transport's, for an NMI handler with add-ons |
-| `rebuild_lines(h)` | The line tables for height h; the build calls it when the height changes |
+| `rebuild_lines(h)` | The line tables for floor height h (0..127); the build calls it when the height changes |
 
 **Bands.** `build(top, lines)` puts the horizon at `top + sky`, the sky
 clamped to the band, and builds `lines − sky` ground lines. A band
@@ -996,11 +1048,11 @@ on the height, so tilting slides the picture, and it can't look straight
 down. `M7PlainRotation` takes the camera's pitch as a real angle and
 rebuilds its line tables for it, so the foreshortening changes as a real
 camera's does. For a real camera 1/depth is linear in the screen line, so
-a pitch or height change costs two divisions and a table read per line.
+a pitch or altitude change costs a few divisions and a table read per line.
 
 `m7k_plain_rotation!(Name, STATE, Hdma, HDMA_STATE, rows)` is shaped like
 `m7k_plain!`, with the default instance `M7PlainRotation` (state
-`M7K_PLAIN_ROTATION`, 722 bytes) over `M7HDMA` and the row builder
+`M7K_PLAIN_ROTATION`, 729 bytes) over `M7HDMA` and the row builder
 `m7k_plain_rows_mul`. It implements `Mode7` and `Mode7Scan`, so a
 per-line add-on written for the floor works with it: `examples/plain_rotation/`
 puts the flyer's own sky over it. It includes only `core.r65`, which
@@ -1018,8 +1070,9 @@ needs a different pivot, and is future work.
 
 ### Line tables
 
-Rebuilt when the height or the pitch changes (`rebuild_lines`). With
-H = 40 + height/2 texels, F = 128 pixels and v = line − 112, a line meets
+Rebuilt when the altitude or the pitch changes (`rebuild_lines`). With
+the altitude H = height · 64 / scale_y texels (clamped to 40..248,
+computed only when the height or scale_y changes), F = 128 pixels and v = line − 112, a line meets
 the plane at lateral scale t = H / (F·sin θ + v·cos θ):
 
 - **The interpolant.** zr(v) = (4096·sin θ + 32·v·cos θ) / H is linear
@@ -1054,7 +1107,9 @@ costs 6 lines.
 ### Straight down
 
 At θ = 64, cos θ = 0, so every line has the same matrix: A = D = z·cos ψ
-and B = −C = z·sin ψ, a rotation scaled by the height. The build writes
+and B = −C = z·sin ψ, a rotation scaled by the altitude, z = H/2, and stretched across by q:
+at height 128 it is `M7Static`'s matrix for the same scales, but for z's
+rounding and |cos| and |sin| halved. The build writes
 **one row** and `segment` lays it out with the transport's `seg_hold`:
 once entries pointing every line at that row. Turning costs 10 lines, like
 `M7Static`. The row is in the back buffer, double-buffered like any
@@ -1071,9 +1126,11 @@ half works too.
 
 `to_screen` is the floor's search over `M7PlainRotation`'s tables:
 1. Rotate the offset into forward and lateral distances (`m7k_rotate14`).
-2. Cull by the farthest |`line_dist`| plus that line's half width, 2z.
+2. Cull by the farthest |`line_dist`| plus that line's half width at the
+   widest stretch, 4z.
 3. Binary-search `line_dist` for sy, with signed compares.
-4. sx = 128 ± r·`M7K_RECIP[z]` >> 8, with size `M7K_RECIP[z]`.
+4. sx = 128 ± r·size >> 8, with size `M7K_RECIP[z]`, times p when the
+   scales differ (`m7k_stretch`, one multiply).
 
 `depth()` is the forward distance. `to_world` inverts it with
 `line_dist`. A horizontal flip is kept and a vertical one dropped, as on
@@ -1081,15 +1138,16 @@ the floor.
 
 ### Measured
 
-Bench cases 18–22, at height 64, in scanlines:
+Bench cases 18–22 and 24, at height 72, in scanlines:
 
 | Case | Lines |
 |---|---|
-| turning, pitch 16 (22.5°) | 182 |
-| turning, pitch 32 (45°) | 275 |
-| turning, straight down | 10 |
-| a pitch change at 16 (tables and rows) | 395 |
-| unchanged | 6 |
+| turning, pitch 16 (22.5°) | 183 |
+| turning, pitch 16, stretched (56, 64) | 187 |
+| turning, pitch 32 (45°) | 277 |
+| turning, straight down | 11 |
+| a pitch change at 16 (tables and rows) | 397 |
+| unchanged | 7 |
 
 - **Turning at 45° takes longer than a frame.** The 4-product row loop
   needs the tuning the floor's loop got.
@@ -1164,6 +1222,12 @@ own copy of the flyer example's sky bands, built around the floor.
 | `to_screen` × 5 (the flyer's objects) | 66 | 56 |
 | `M7Static::update` / `to_screen` | 10 / 16 | 10 / 16 |
 
+Since v0.2 the bench reads 148 turning and 9 unchanged; the camera's
+scales and height account for a third of a line of that (three byte
+compares a frame). A stretched floor, scales (56, 64), takes the four-product
+rows: 238 lines turning with the sky, past the frame's 225, so a stretched
+flyer that turns runs at 30 fps.
+
 - **Where v0.2 gains.** Build keys skip unchanged rows and tables; the
   quadrant loops drop the per-row sign masks; WRMPYA keeps z for the second
   product; the stores fill the multiplier's wait; the sky's bands write in
@@ -1221,11 +1285,12 @@ but the beach ball use dizworld's assets (copied from
 attribution) and draw no sprites.
 
 - **`examples/topdown/`** includes `static.r65`. The D-pad moves along and
-  across the heading (its `CAMERA`'s `forward` / `strafe`), L/R turn, A/X zoom
-  both axes, Y/B stretch only the vertical axis (`M7Static::set_zoom`).
+  across the heading (its `CAMERA`'s `forward` / `strafe`), L/R turn, A/X
+  zoom the camera in and out, both scales alike (`M7Static` reads the
+  scales and ignores the height).
 - **`examples/flyer/`** includes `plain.r65`, and has its own sky bands and
   `Horizon` background in `src/` (see its README). dizworld's controls;
-  L/R change the floor's height, X/B its pitch, Start toggles
+  L/R change the camera's height, X/B its pitch, Start toggles
   `Horizontal`. It projects five world points with
   `M7Plain::to_screen` into `OBJECT_SCREEN` for the tests.
 - **`examples/split/`** includes `plain.r65`: a second camera and floor
@@ -1260,10 +1325,17 @@ The tests check:
 
 - every table's bytes, read by symbol, against the formulas above, and that
   the top-down build has none of the floor's tables or state;
-- `M7Static`'s matrix and inverse for six angle and zoom pairs, the 8:7
-  aspect case and an exact quarter turn; that it never stores to HDMAEN;
+- `M7Static`'s matrix and inverse for nine headings and camera scales,
+  equal and stretched, and an exact quarter turn; that the height changes
+  nothing; that it never stores to HDMAEN;
   the flat `to_world` for five headings and pixels;
 - the top-down buttons: zoom, turn, the D-pad's sideways step;
+- the camera's height and scale_y as the floor's height, clamped, and as
+  the plain rotation's altitude, clamped to 40..248; stretched rows (the
+  floor's four-product path, the plain rotation's lateral factors) and
+  stretched `to_screen` in both views and the plain rotation's picture;
+  straight down at height 128, the plain rotation's row is `M7Static`'s
+  matrix for equal and unequal scales;
 - the floor's line tables, indirect tables (entries, addresses,
   terminator), top unit and per-line A–D with their signs in all four
   quadrants and on the axes;
@@ -1317,9 +1389,9 @@ themselves against the formulas.
 - **The row loop's code shape.** See [Cycle budget](#cycle-budget). A ROM
   product table (62 KB) was measured and dropped; it pays once the index
   stays in a register.
-- **Height changes.** `rebuild_lines` costs 159 lines on the frame the
-  height changes. Spreading it over two frames, or keeping a few heights'
-  tables, would keep 60 fps while climbing.
+- **Height changes.** `rebuild_lines` costs 158 lines on the frame the
+  floor's height changes. Spreading it over two frames, or
+  keeping a few heights' tables, would keep 60 fps while climbing.
 - **Projection.** 13 lines a visible object, of which the rotation is 5
   and the line search 2; the rest is calls and stack traffic.
 - **Worlds larger than 1024 texels.** These need a 32-bit or 16.16 world

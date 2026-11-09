@@ -41,8 +41,9 @@ bands they need.
 Call them on the type: `M7Static::update()`, `M7Plain::nmi()`. The HDMA
 views (`M7Plain`, `M7PlainRotation`, a transport) also have `stop()`,
 which turns their channels off when a game switches away from them. The
-camera carries the height and the pitch, which each view reads its own
-way; `M7Static` has its own zoom, `M7Static::set_zoom(zx, zy)`.
+camera carries the scales, the height and the pitch: every view zooms
+by the scales alike, the perspective ones fly at the height, and each
+reads the pitch its own way.
 
 ## Files
 
@@ -55,7 +56,7 @@ Tables build at compile time.
 | `plain.r65` | `M7Plain`, the perspective floor (a `Mode7Scan`) | + depth scale (2.3 KB) and per-height tables (640 B) | + 0.7 KB |
 | `plain_rotation.r65` | `M7PlainRotation`, the plain at a true pitch (a `Mode7Scan`) | + depth scale (2.3 KB) | + 0.7 KB |
 | `hdma.r65` | the transport macro `m7k_hdma!` and `M7HDMA`, the per-line views' transport, for your own effects, HDMA channels 2–3 | none | + 3.7 KB (16 B a line) |
-| `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Camera` and the world-coordinate helpers, the sin/cos and zoom reciprocal tables, the M7SEL enums, VRAM upload macros | sin/cos (640 B), reciprocal (512 B) | none (7 B for each camera you declare) |
+| `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Camera` and the world-coordinate helpers, the sin/cos and zoom reciprocal tables, the M7SEL enums, VRAM upload macros | sin/cos (640 B), reciprocal (512 B) | none (9 B for each camera you declare) |
 
 ## Quick start
 
@@ -71,9 +72,7 @@ A rotating, zooming top-down map:
 include!("mode7kit/static.r65")
 
 #[lowram]
-static mut CAMERA: M7Camera = M7Camera {
-    x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0,
-};
+static mut CAMERA: M7Camera = m7k_camera(512, 512);   // texel (512, 512), heading 0
 
 #[interrupt(nmi)]
 fn vblank() { M7Static::nmi(); }
@@ -88,7 +87,7 @@ fn main() -> ! {
         wait_nmi!();
         CAMERA.turn(1);
         CAMERA.forward(64);                   // one texel along the heading
-        M7Static::set_zoom(zoom, zoom);
+        CAMERA.set_scale(zoom, zoom);         // 64 is 1x, higher is closer
         M7Static::update();
         let sx, sy, size = M7Static::to_screen(enemy_x, enemy_y);   // a sprite on the map
     }
@@ -110,7 +109,7 @@ TM = 0x11;                        // BG1 + OBJ
 loop {
     wait_nmi!();
     CAMERA.turn(2);
-    CAMERA.set_height(height);
+    CAMERA.set_height(height);           // texels up; the floor takes 40..103
     CAMERA.set_pitch(pitch);             // the floor: a horizon shift in scanlines
     M7Plain::update();
     let sx, sy, size = M7Plain::to_screen(enemy_x, enemy_y);
@@ -142,8 +141,8 @@ a single object: a spinning, squashing ball over a sprite floor.
 |---|---|---|
 | angle | `u8` | 256 steps per turn |
 | matrix entry | `i16` | 8.8 fixed point: `0x0100` is 1.0 |
-| zoom | `u8` per screen axis | 64 is 1.0×, 128 magnifies 2×, 16 shrinks to ¼× |
-| height | `u8` | the camera's height, 0..127 |
+| scale, zoom | `u8` | 64 is 1.0×, 128 magnifies 2×, 16 shrinks to ¼×, per screen axis: the camera's `scale_x`, `scale_y`, and the manual matrix setters' `zx`, `zy` |
+| height | `u8` | the camera's, texels above the plane; the perspective views only |
 | pitch | `i8` | the camera's, −32..64. `M7Plain`: scanlines, negative looks down. `M7PlainRotation`: an angle, 6 (8.4°) to 64 (straight down) |
 | world coordinate | `M7Coord` | 10.6 fixed-point texels on the 1024×1024 plane |
 | screen position | `i16` | pixels; off-screen points fall outside 0..255 / 0..223 |
@@ -158,13 +157,33 @@ around it, and `m7k_delta(a, b)` is the shortest way between two points.
 
 The camera is yours: declare an `M7Camera` as a `#[lowram] static mut`
 (the view keeps a near pointer to it) and hand it to the view's `setup`.
+`m7k_camera(x, y)` builds one at texel (x, y), facing heading 0 at scales
+64, 64 (1×), height 128 and pitch 0, for a static's initializer; write the struct out for
+anything else.
 The package has none of its own. Move it with `.set(x, y)`,
 `.set_heading(h)`, `.turn(d)`, `.forward(speed)` and `.strafe(speed)` (in
-1/64 texels; negative goes back or left), and `.set_height(h)`,
-`.set_pitch(p)` and `.tilt(d)`. The view keeps the pointer, so moving the
-camera moves the view, and two views set up with the same camera show
+1/64 texels; negative goes back or left), and `.set_scale(x, y)`,
+`.set_height(h)`, `.set_pitch(p)` and `.tilt(d)`. A speed may be any
+`i16`. The view keeps the pointer, so moving the camera moves the view, and two views set up with the same camera show
 the same place. For a second view, declare another camera and pass it,
 at `setup` or later with `FloorB::set_camera(&CAM_B)`.
+
+The scales zoom every view alike, each on its screen axis. Unequal, they
+stretch: `set_scale(56, 64)` makes a texel square on the SNES's 8:7
+pixels. `M7Static` builds its matrix from them as they are and has no
+height. A perspective view flies at the height, scaled: H = height · 64 /
+scale_y texels, since zooming the world in by k shows what a camera k
+times lower sees; it stretches across by scale_y / scale_x (clamped to
+½..2). Both divide, so a perspective view works them out only when the
+scales or the height change, with the line tables or rows it rebuilds
+then anyway. It clamps H to the altitudes its tables hold: `M7Plain`
+40..103 texels, `M7PlainRotation` 40..248. At height 128, a straight-down
+`M7PlainRotation` shows `M7Static`'s picture for the same scales.
+
+A stretch costs the floor more: its rows share one product between A and
+D, which unequal scales tell apart, so a stretched floor takes four
+products a row instead of two (see [Cost](#cost)). `M7PlainRotation`
+already takes four, and pays nothing per row.
 
 The projections measure from the whole-texel camera the registers show,
 so sprites stay on the ground, and they follow the reflection. `to_world`
@@ -172,10 +191,9 @@ says whether the point is on the map: always under `Wrap`.
 
 ## Static mode
 
-`M7Static::update()` turns the view to the camera's heading, scales it by
-`set_zoom(zx, zy)`, and pins the camera to `set_pivot(sx, sy)` (the screen
-center by default). Equal zooms zoom; unequal ones squash and stretch, and
-`set_zoom(64, 56)` corrects the SNES's 8:7 pixels.
+`M7Static::update()` turns the view to the camera's heading, zooms it by
+the camera's scales, and pins the camera to `set_pivot(sx, sy)` (the
+screen center by default). It ignores the height and the pitch.
 
 For a matrix of your own, skip `update()`: `rotate`, `scale`,
 `rotate_scale`, `identity`, or `set_matrix` with its inverse in
@@ -184,13 +202,13 @@ For a matrix of your own, skip `update()`: `rotate`, `scale`,
 ## The floor, the sky and the HUD
 
 `M7Plain::update()` builds next frame's floor around the camera. The
-horizon is at scanline 32..95, unpitched; higher cameras see more ground.
-The pitch tilts the view: the horizon moves by that many lines, and
-everything on the floor with it. It is a y-shear, the look-up/look-down of
+horizon is at scanline 32..95, unpitched; higher cameras see more
+ground. The pitch tilts the view: the horizon moves by that many
+lines, and everything on the floor with it. It is a y-shear, the look-up/look-down of
 Doom-era engines: convincing for small tilts. The tables are
 double-buffered and swap in vblank, so HDMA never shows a half-built floor;
-if `update` runs late, the old floor stays. A frame whose heading and
-height haven't changed rebuilds nothing.
+if `update` runs late, the old floor stays. A frame whose heading and the
+camera's scales and height haven't changed rebuilds nothing.
 
 `to_screen` on the floor returns `sy == M7K_HIDDEN` for points behind the
 camera, past the horizon or below the floor; `M7Plain::depth()` is the
@@ -275,17 +293,21 @@ the bench's own copy of the flyer's sky bands):
 
 | Work | Scanlines |
 |---|---|
-| floor + sky, 160 ground lines, while turning | 144 |
-| floor + sky, heading and height unchanged | 7 |
-| floor + sky, looking fully down / fully up | 174 / 88 |
-| a height change (the line tables) | + 159 |
+| floor + sky, 160 ground lines, while turning | 148 |
+| floor + sky, heading and camera unchanged | 9 |
+| floor + sky, looking fully down / fully up | 178 / 91 |
+| floor + sky, turning, stretched (56, 64) | 238 |
+| a height change (the line tables) | + 158 |
 | `to_screen` on the floor: visible / behind / far | 13 / 8 / 4 |
 | `M7Static::update` | 10 |
-| `M7PlainRotation` turning at 22.5° / 45° / straight down | 182 / 275 / 10 |
-| `M7PlainRotation` pitch change (tables and rows) | 395 |
+| `M7PlainRotation` turning at 22.5° / 45° / straight down | 183 / 277 / 11 |
+| `M7PlainRotation` turning at 22.5°, stretched (56, 64) | 187 |
+| `M7PlainRotation` pitch change (tables and rows) | 397 |
 
 The flyer example, with five objects projected, runs at 60 fps while
-turning; a frame that changes the height drops to 30.
+turning; a frame that changes the height drops to 30, and so does a
+stretched floor while turning (238 lines, past the frame's room for about
+225).
 
 ## Credits
 

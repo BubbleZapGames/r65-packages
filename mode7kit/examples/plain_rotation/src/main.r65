@@ -26,9 +26,7 @@ include!("horizon.r65")
 
 /// The game's camera, which the view follows (handed to its `setup`).
 #[lowram]
-static mut CAMERA: M7Camera = M7Camera {
-    x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0,
-};
+static mut CAMERA: M7Camera = m7k_camera(512, 512);
 
 const VRAM_SKY_CHR: u16 = 0x6000;
 const VRAM_SKY_MAP: u16 = 0x6C00;
@@ -79,8 +77,8 @@ fn update() {
     if held(JOY_LEFT) { CAMERA.turn(2); }
     if held(JOY_RIGHT) { CAMERA.turn(-2); }
     let h: u8 = CAMERA.height();
-    if held(JOY_L) && h > 1 { CAMERA.set_height(h - 2); }
-    if held(JOY_R) && h < 126 { CAMERA.set_height(h + 2); }
+    if held(JOY_L) && h > M7K_PLAIN_ALT_MIN + 1 { CAMERA.set_height(h - 2); }
+    if held(JOY_R) && h < M7K_PLAIN_ALT_MAX - 1 { CAMERA.set_height(h + 2); }
     let p: i8 = CAMERA.pitch();
     if held(JOY_X) && p > M7K_PLAIN_PITCH_MIN { CAMERA.tilt(-1); }
     if held(JOY_B) && p < M7K_PLAIN_PITCH_MAX { CAMERA.tilt(1); }
@@ -132,6 +130,7 @@ fn main() -> ! {
     M7PlainRotation::setup(&CAMERA, M7Repeat::Wrap, M7Flip::None);
     Horizon::setup();
     CAMERA.set(M7Coord::from_texel(512), M7Coord::from_texel(512));
+    CAMERA.set_height(72);                           // texels up
     CAMERA.set_pitch(16);                            // 22.5° down
     NMITIMEN = Interrupt::Nmi as u8 | Interrupt::AutoJoy as u8;
 

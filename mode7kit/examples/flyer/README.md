@@ -22,8 +22,9 @@ pytest tests     # drive the ROM in Mesen-GDB (pip install -e Mesen-GDB/python)
 ```
 
 The tests set a view by writing mode7kit's state (the camera's heading,
-height and pitch), or by pressing the ROM's buttons. They check
-mode7kit's tables, the floor's rows in every quadrant, the floor's and the
+scales, height and pitch), or by pressing the ROM's buttons. They check
+mode7kit's tables, the floor's rows in every quadrant (equal and stretched
+scales), the floor's and the
 bands' HDMA tables, the pitch,
 the vertical flip and the floor projection against the same formulas in
 Python.

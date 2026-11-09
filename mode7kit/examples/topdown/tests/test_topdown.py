@@ -1,8 +1,7 @@
 """mode7kit's flat view, driven through the top-down example ROM.
 
-Each test sets a view by writing mode7kit's state (the camera's heading,
-`M7Static`'s zoom) or pressing the example's buttons, lets the frame run,
-and checks the state that follows against the same formulas in Python:
+Each test sets a view by writing the camera (its heading and its scales)
+or pressing the example's buttons, lets the frame run, and checks the state that follows against the same formulas in Python:
 the compile-time tables, `M7Static`'s matrix and the camera.
 """
 import math
@@ -14,8 +13,8 @@ from pathlib import Path
 # Struct offsets (packed, declaration order).
 S_SEL, S_A, S_B, S_C, S_D = 0, 1, 3, 5, 7          # M7Static
 S_IA, S_IB, S_IC, S_ID = 9, 11, 13, 15
-S_ZX, S_ZY = 27, 28
-CAM_HEADING = 4                                       # M7Camera
+S_ZOOM = 27
+CAM_HEADING, CAM_SX, CAM_SY, CAM_HEIGHT = 4, 5, 6, 7                       # M7Camera
 ASM = Path(__file__).parent.parent / "build" / "main.asm"
 
 def s16(v):
@@ -50,13 +49,15 @@ def q8(m, k):
 
 # -- driving the ROM ------------------------------------------------------------
 
-def set_view(s, angle=None, zx=None, zy=None):
+def set_view(s, angle=None, scale=None, height=None):
+    cam = s.resolve("CAMERA")
     if angle is not None:
-        s.write(s.resolve("CAMERA") + CAM_HEADING, angle & 0xFF)
-    if zx is not None:
-        s.write(s.resolve("M7K_STATIC") + S_ZX, zx)
-    if zy is not None:
-        s.write(s.resolve("M7K_STATIC") + S_ZY, zy)
+        s.write(cam + CAM_HEADING, angle & 0xFF)
+    if scale is not None:
+        s.write(cam + CAM_SX, scale[0])
+        s.write(cam + CAM_SY, scale[1])
+    if height is not None:
+        s.write(cam + CAM_HEIGHT, height)
     s.wait(3)
 
 
@@ -98,11 +99,15 @@ def test_only_the_included_tables(top):
 # -- the flat view ----------------------------------------------------------------
 
 @pytest.mark.parametrize("angle,zx,zy", [(0, 64, 64), (64, 64, 64), (32, 128, 128),
-                                         (0, 64, 56), (200, 90, 33), (100, 16, 200)])
+                                         (200, 40, 40), (100, 255, 255), (10, 16, 16),
+                                         (0, 56, 64), (40, 64, 32), (150, 200, 90)])
 def test_rotate_scale_matrix_and_inverse(top, angle, zx, zy):
+    """The camera's heading turns the view and its scales zoom it, each on
+    its screen axis."""
     s = top
-    set_view(s, angle=angle, zx=zx, zy=zy)
+    set_view(s, angle=angle, scale=(zx, zy))
     m = state(s)
+    assert m[S_ZOOM] == zx
     sn, cs = SINCOS[angle], SINCOS[angle + 64]
     kx, ky = RECIP[zx], RECIP[zy]
     assert [word(m, o) for o in (S_A, S_B, S_C, S_D)] == \
@@ -113,9 +118,18 @@ def test_rotate_scale_matrix_and_inverse(top, angle, zx, zy):
 
 def test_quarter_turn_is_exact(top):
     s = top
-    set_view(s, angle=64, zx=64, zy=64)
+    set_view(s, angle=64, scale=(64, 64))
     m = state(s)
     assert [word(m, o) for o in (S_A, S_B, S_C, S_D)] == [0, 0x100, -0x100, 0]
+
+
+def test_height_is_ignored(top):
+    """A flat view has no height: writing it changes no matrix entry."""
+    s = top
+    set_view(s, angle=30, scale=(70, 60))
+    before = state(s)
+    set_view(s, height=20)
+    assert state(s) == before
 
 
 def test_static_never_writes_hdmaen():
@@ -127,14 +141,15 @@ def test_static_never_writes_hdmaen():
 
 
 def test_zoom_buttons(top):
-    """A zooms in and X zooms out, both axes together, a step a frame."""
+    """A zooms the camera in and X out, both scales a step a frame, and the
+    matrix follows."""
     s = top
     s.hold("a", frames=20).wait(2)
-    zx, zy = state(s)[S_ZX:S_ZY + 1]
-    assert zx == zy > 64
+    cam = s.raw("CAMERA").bytes()
+    assert 80 <= cam[CAM_SY] <= 86 and cam[CAM_SX] == cam[CAM_SY] == state(s)[S_ZOOM]
     s.hold("x", frames=40).wait(2)
-    zx, zy = state(s)[S_ZX:S_ZY + 1]
-    assert zx == zy < 64
+    cam = s.raw("CAMERA").bytes()
+    assert 40 <= cam[CAM_SY] <= 46 and cam[CAM_SX] == cam[CAM_SY] == state(s)[S_ZOOM]
 
 
 def test_turn_buttons(top):

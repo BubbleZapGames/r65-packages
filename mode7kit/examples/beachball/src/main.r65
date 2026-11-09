@@ -24,9 +24,7 @@ include!("mode7kit/static.r65")
 
 /// The game's camera, which the view follows (handed to its `setup`).
 #[lowram]
-static mut CAMERA: M7Camera = M7Camera {
-    x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0,
-};
+static mut CAMERA: M7Camera = m7k_camera(512, 512);
 
 // ============================================================================
 // LAYOUT

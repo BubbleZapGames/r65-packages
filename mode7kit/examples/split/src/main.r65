@@ -24,9 +24,7 @@ include!("split.r65")
 
 /// The game's camera, which the view follows (handed to its `setup`).
 #[lowram]
-static mut CAMERA: M7Camera = M7Camera {
-    x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0,
-};
+static mut CAMERA: M7Camera = m7k_camera(512, 512);
 
 const VRAM_SKY_CHR: u16 = 0x6000;
 const VRAM_SKY_MAP: u16 = 0x6C00;
@@ -34,7 +32,8 @@ const VRAM_SKY_MAP: u16 = 0x6C00;
 /// The bottom half's camera, facing the other way.
 #[lowram]
 static mut CAM_B: M7Camera = M7Camera {
-    x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 128, height: 64, pitch: 0,
+    x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 128,
+    scale_x: 64, scale_y: 64, height: 72, pitch: 0,
 };
 
 /// The bottom half's floor, over the same transport as `M7Plain`.
@@ -100,6 +99,7 @@ fn main() -> ! {
     Split::set_sky(BG::Mode1, 0x01, 0x01);           // Mode 1 sky and Mode 7 floors, both BG1
     Split::setup(&CAMERA, M7Repeat::Wrap, M7Flip::None);
     CAMERA.set(M7Coord::from_texel(512), M7Coord::from_texel(512));
+    CAMERA.set_height(72);                           // texels up
     CAM_B.set(M7Coord::from_texel(300), M7Coord::from_texel(700));
     NMITIMEN = Interrupt::Nmi as u8 | Interrupt::AutoJoy as u8;
 

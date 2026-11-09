@@ -2,26 +2,28 @@
 //!
 //! Includes `core.r65`; adds no table. `M7Static` implements `Mode7`
 //! with its own copy of the matrix, its inverse, the center, the scroll,
-//! M7SEL and its camera, in the `M7K_STATIC` singleton. It touches no HDMA register: a Static game owns HDMAEN and
-//! may run its own HDMA on any channel.
+//! M7SEL and its camera, in the `M7K_STATIC` singleton. It touches no
+//! HDMA register: a Static game owns HDMAEN and may run its own HDMA on
+//! any channel.
 //!
-//! `update()` turns the view to its camera's heading, scales it by the
-//! zoom, and pins the camera to the pivot pixel. A game that builds its
-//! own matrix skips `update()` and uses the manual setters below.
+//! `update()` turns the view to its camera's heading, zooms it by the
+//! camera's scales (64 is 1×, higher is closer; unequal, they stretch),
+//! and pins the camera to the pivot pixel. It ignores the camera's height,
+//! as it does its pitch: a flat view zooms by its scales. A game that
+//! builds its own matrix skips `update()` and uses the manual setters
+//! below.
 //!
 //! ```
 //! include!("mode7kit/static.r65")
 //!
 //! #[lowram]
-//! static mut CAMERA: M7Camera = M7Camera {
-//!     x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0,
-//! };
+//! static mut CAMERA: M7Camera = m7k_camera(512, 512);
 //!
 //! M7Static::setup(&CAMERA, M7Repeat::Wrap, M7Flip::None);   // force blank
 //! loop {
 //!     wait_nmi!();
 //!     CAMERA.turn(1);
-//!     M7Static::set_zoom(80, 80);
+//!     CAMERA.set_scale(96, 96);                    // 1.5×: zoomed in
 //!     M7Static::update();
 //!     let sx, sy, size = M7Static::to_screen(enemy_x, enemy_y);
 //! }
@@ -57,9 +59,9 @@ struct M7Static {
     /// The screen pixel the center is pinned to.
     px: u8,
     py: u8,
-    /// Zoom per screen axis, 64 = 1.0×: what `update()` scales by.
-    zx: u8,
-    zy: u8,
+    /// The horizontal zoom the matrix was last built with (64 = 1.0×), for
+    /// `to_screen`'s texel size.
+    zoom: u8,
     /// The camera `update()` follows.
     camera: *M7Camera,
 }
@@ -73,7 +75,7 @@ static mut M7K_STATIC: M7Static = M7Static {
     ia: 0x100, ib: 0, ic: 0, id: 0x100,
     cx: 0, cy: 0, hofs: 0, vofs: 0,
     px: 128, py: 112,
-    zx: 64, zy: 64,
+    zoom: 64,
     camera: 0 as *M7Camera,
 };
 
@@ -95,11 +97,12 @@ impl Mode7 for M7Static {
         return M7K_STATIC.camera;
     }
 
-    /// Turns by the camera's heading, scales by the zoom, and pins the
+    /// Turns by the camera's heading, zooms by its scales, and pins the
     /// camera's texel to the pivot pixel.
     fn update() {
         let cam: *M7Camera = M7K_STATIC.camera;
-        M7Static::rotate_scale(cam.heading, M7K_STATIC.zx, M7K_STATIC.zy);
+        if cam as u16 == 0 { return; }      // not set up: no camera to follow
+        M7Static::rotate_scale(cam.heading, cam.scale_x, cam.scale_y);
         let cx: u16 = cam.x.texel();
         let cy: u16 = cam.y.texel();
         M7K_STATIC.cx = cx;
@@ -117,7 +120,7 @@ impl Mode7 for M7Static {
 
     /// S = P + M⁻¹·(W - C), then the reflection. Points off screen get
     /// coordinates outside 0..255 / 0..223; sy is never `M7K_HIDDEN`. The
-    /// size is the horizontal texel size, `zx << 2`.
+    /// size is the horizontal texel size, `zoom << 2`.
     fn to_screen(x: M7Coord, y: M7Coord) -> i16, i16, u16 {
         let dx, dy = m7k_from_center(x, y, M7K_STATIC.cx, M7K_STATIC.cy);
         let mut sx: i16 = M7K_STATIC.px as i16
@@ -127,7 +130,7 @@ impl Mode7 for M7Static {
         let flip: M7Flip = M7Static::flip();
         if flip.horizontal() { sx = 255 - sx; }
         if flip.vertical() { sy = 255 - sy; }
-        return sx, sy, (M7K_STATIC.zx as u16) << 2;
+        return sx, sy, (M7K_STATIC.zoom as u16) << 2;
     }
 
     /// W = C + M·(S - P), after undoing the reflection.
@@ -160,16 +163,14 @@ impl Mode7 for M7Static {
 
 impl M7Static {
     // -- properties `update()` reads ----------------------------------------
+    //
+    // The zoom is the camera's scales; a game wanting more (a skew, a
+    // matrix of its own) builds it below.
 
-    /// The zoom per screen axis, 64 = 1.0×.
-    fn set_zoom(zx: u8, zy: u8) {
-        M7K_STATIC.zx = zx;
-        M7K_STATIC.zy = zy;
-    }
-
-    /// The zoom, x then y.
-    fn zoom() -> u8, u8 {
-        return M7K_STATIC.zx, M7K_STATIC.zy;
+    /// The zoom `update()` last built with, or a manual `scale` /
+    /// `rotate_scale` set (64 = 1.0×).
+    fn zoom() -> u8 {
+        return M7K_STATIC.zoom;
     }
 
     /// The screen pixel the camera is pinned to; `(M7_CENTER_X,
@@ -199,6 +200,7 @@ impl M7Static {
     /// Scales the horizontal screen axis by `zx` and the vertical by `zy`,
     /// unrotated: A = 1/zx, D = 1/zy, B = C = 0. No multiply.
     fn scale(zx: u8, zy: u8) {
+        M7K_STATIC.zoom = zx;
         M7K_STATIC.a = m7k_recip(zx) as i16;
         M7K_STATIC.b = 0;
         M7K_STATIC.c = 0;
@@ -216,6 +218,7 @@ impl M7Static {
     ///
     /// The inverse is diag(sx, sy)·Rᵀ. Equal zooms take the 2-multiply path.
     fn rotate_scale(angle: u8, zx: u8, zy: u8) {
+        M7K_STATIC.zoom = zx;
         let s: i16 = m7k_sin(angle);
         let c: i16 = m7k_cos(angle);
         let kx: u16 = m7k_recip(zx);
@@ -245,6 +248,7 @@ impl M7Static {
     /// The identity matrix and its inverse: one texel per pixel, unrotated.
     fn identity() {
         M7K_STATIC.a = 0x100;
+        M7K_STATIC.zoom = 64;
         M7K_STATIC.b = 0;
         M7K_STATIC.c = 0;
         M7K_STATIC.d = 0x100;

@@ -2,7 +2,7 @@
 //!
 //! `static.r65`: `M7Static`, one matrix a frame. D-pad up/down move along
 //! the heading and left/right move across it, L/R turn, A/X zoom in and
-//! out, Y/B stretch the vertical axis only.
+//! out.
 //!
 //! Graphics: dizworld by Brad Smith (CC BY 4.0), with art by Sharm from
 //! OpenGameArt; see README.md.
@@ -19,17 +19,14 @@ include!("mode7kit/static.r65")
 
 /// The game's camera, which the view follows (handed to its `setup`).
 #[lowram]
-static mut CAMERA: M7Camera = M7Camera {
-    x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0,
-};
+static mut CAMERA: M7Camera = m7k_camera(512, 512);
 
 // ============================================================================
 // STATE
 // ============================================================================
 
-/// The pad, and a frame counter. The view itself lives in mode7kit: the
-/// heading in `CAMERA`, the zoom in `M7K_STATIC`, where the tests write
-/// them.
+/// The pad, and a frame counter. The view is the camera: its heading and
+/// scales are in `CAMERA`, where the tests write them.
 struct Game {
     frames: u16,
     pad: u16,
@@ -50,12 +47,10 @@ fn held(button: u16) -> bool {
 fn update() {
     if held(JOY_L) { CAMERA.turn(1); }
     if held(JOY_R) { CAMERA.turn(-1); }
-    let zx, zy = M7Static::zoom();
-    if held(JOY_A) && zx < 255 { M7Static::set_zoom(zx + 1, zy + 1); }
-    if held(JOY_X) && zx > 16 { M7Static::set_zoom(zx - 1, zy - 1); }
-    let zx2, zy2 = M7Static::zoom();
-    if held(JOY_Y) && zy2 < 255 { M7Static::set_zoom(zx2, zy2 + 1); }
-    if held(JOY_B) && zy2 > 16 { M7Static::set_zoom(zx2, zy2 - 1); }
+    // the camera's scales, both alike: A closer, X farther (4× down to ¼×)
+    let _sx, z = CAMERA.scale();
+    if held(JOY_A) && z < 255 { CAMERA.set_scale(z + 1, z + 1); }
+    if held(JOY_X) && z > 16 { CAMERA.set_scale(z - 1, z - 1); }
     // Up/Down along the heading, Left/Right across it, two texels a frame
     if held(JOY_UP) { CAMERA.forward(128); }
     if held(JOY_DOWN) { CAMERA.forward(-128); }

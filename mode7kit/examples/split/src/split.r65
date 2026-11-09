@@ -17,9 +17,9 @@
 //! include!("split.r65")
 //!
 //! #[lowram]
-//! static mut CAM1: M7Camera = M7Camera { x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, height: 64, pitch: 0 };
+//! static mut CAM1: M7Camera = M7Camera { x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 0, scale_x: 64, scale_y: 64, height: 72, pitch: 0 };
 //! #[lowram]
-//! static mut CAM2: M7Camera = M7Camera { x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 128, height: 64, pitch: 0 };
+//! static mut CAM2: M7Camera = M7Camera { x: M7Coord(0x8000), y: M7Coord(0x8000), heading: 128, scale_x: 64, scale_y: 64, height: 72, pitch: 0 };
 //!
 //! m7k_plain!(Floor2, FLOOR2, M7HDMA, M7K_HDMA, m7k_rows_mul);
 //! m7k_bands!(Bands4, BANDS4, M7HDMA, 4, 4, 5);       // 4 bands, no COLDATA

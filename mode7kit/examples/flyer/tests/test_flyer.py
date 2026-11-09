@@ -2,7 +2,7 @@
 example ROM.
 
 Each test sets a view by writing mode7kit's state (the camera's heading,
-height and pitch) or pressing the example's buttons, lets the
+scales, height and pitch) or pressing the example's buttons, lets the
 frame run, and checks the state that follows against the same formulas in
 Python: the compile-time tables, the HDMA tables the floor and the horizon
 split are built in, and the floor projection.
@@ -14,10 +14,10 @@ import pytest
 # Struct offsets (packed, declaration order).
 H_SEL, H_CY, H_VOFS, H_BACK, H_READY, H_HDMAEN = 0, 3, 7, 9, 10, 11   # M7HDMA
 H_TOP, H_ABI, H_CDI, H_AB, H_CD = 13, 21, 85, 149, 1941
-F_SKY, F_GROUND, F_FOOT, F_BUILT_HEIGHT = 1, 2, 3, 4                 # M7Plain
-F_CY, F_VOFS, F_LINE_Z, F_LINE_DIST = 13, 17, 19, 243
+F_SKY, F_GROUND, F_FOOT, F_BUILT_SY = 1, 2, 3, 4                     # M7Plain
+F_CY, F_VOFS, F_LINE_Z, F_LINE_DIST, F_ROW, F_LAT = 13, 17, 19, 243, 716, 719
 B_BGM, B_TMT, B_COL, B_FADE, B_STRIDE, B_COL_STRIDE = 11, 37, 63, 107, 13, 22  # M7Bands
-CAM_HEADING, CAM_HEIGHT, CAM_PITCH = 4, 5, 6                             # M7Camera
+CAM_HEADING, CAM_SX, CAM_SY, CAM_HEIGHT, CAM_PITCH = 4, 5, 6, 7, 8                          # M7Camera
 PITCH_DOWN, PITCH_UP = 32, 64
 DATA_WORDS = 448                 # one buffer of rows: 224 lines x A, B (or C, D)
 IND = 32                         # one buffer of an indirect table
@@ -49,6 +49,30 @@ def fsin(i):
 SINCOS = [fsin(i) for i in range(320)]
 RECIP = [0x7FFF] + [16384 // z for z in range(1, 256)]
 ZRECIP = [255] + [min(255, 32768 // i) for i in range(1, 2321)]
+
+
+def floor_row(height, sy=64):
+    """The floor height (0..127) for a camera height and scale_y: 2·(H -
+    40) for the altitude H = height · 64 / scale_y, clamped."""
+    return min(max((height << 7) // max(sy, 1) - 80, 0), 127)
+
+
+def height_of(row):
+    """The least camera height (at scale_y 64) whose floor height is `row`."""
+    return min(h for h in range(256) if floor_row(h) == row)
+
+
+def lateral(sx, sy):
+    """m7k_lateral: (texels per pixel across, pixels per texel), 8.8."""
+    y = max(sy, 1)
+    x = min(max(sx, (y >> 1) + 1), min(y << 1, 255))
+    if x == y:
+        return 0x100, 0x100
+    return (y << 8) // x, (x << 8) // y
+
+
+def stretch(v, q):
+    return min((v * q) >> 8, 0x7FFF)
 
 
 def sky_of(h):
@@ -89,11 +113,19 @@ def fade():
 
 # -- driving the ROM ------------------------------------------------------------
 
-def set_view(s, angle=None, height=None, pitch=None):
+def set_view(s, angle=None, row=None, pitch=None, height=None, scale=(64, 64)):
+    """`row` is the floor's height: the camera takes the height that gives
+    it at scale_y 64."""
+    cam = s.resolve("CAMERA")
     if angle is not None:
-        s.write(s.resolve("CAMERA") + CAM_HEADING, angle & 0xFF)
+        s.write(cam + CAM_HEADING, angle & 0xFF)
+    if row is not None:
+        height = height_of(row)
     if height is not None:
-        s.write(s.resolve("CAMERA") + CAM_HEIGHT, height)
+        s.write(cam + CAM_HEIGHT, height)
+    if scale is not None:
+        s.write(cam + CAM_SX, scale[0])
+        s.write(cam + CAM_SY, scale[1])
     if pitch is not None:
         s.write(s.resolve("CAMERA") + CAM_PITCH, pitch & 0xFF)
     # a frame can take two vblanks: wait out the pass that read the old
@@ -163,10 +195,10 @@ def shown_table(s, field):
 
 def test_floor_tables(flyer):
     s = flyer
-    set_view(s, angle=0, height=64)
+    set_view(s, angle=0, row=64)
     f = floor(s)
     sky, ground = sky_of(64), 224 - sky_of(64)
-    assert (f[F_SKY], f[F_GROUND], f[F_BUILT_HEIGHT]) == (sky, ground, 64)
+    assert (f[F_SKY], f[F_GROUND], f[F_BUILT_SY], f[F_ROW]) == (sky, ground, 64, 64)
     assert f[F_FOOT] == foot_of(64) == ground + PITCH_DOWN
     z = line_z(64)
     assert list(f[F_LINE_Z:F_LINE_DIST])[:len(z)] == z
@@ -188,12 +220,58 @@ def test_floor_tables(flyer):
     assert data[1::2] == [0] * ground
 
 
+@pytest.mark.parametrize("height,sy,row", [(72, 64, 64), (73, 64, 66), (90, 64, 100),
+                                           (40, 64, 0), (20, 64, 0), (104, 64, 127),
+                                           (255, 64, 127), (36, 32, 64), (144, 128, 64),
+                                           (60, 0, 127)])
+def test_height_and_scale_give_the_floor_height(flyer, height, sy, row):
+    """The camera's height and scale_y give the floor's height, clamped:
+    2·(H - 40) for the altitude H = height · 64 / scale_y, as the plain
+    rotation's. A scale_y of 0 counts as 1."""
+    s = flyer
+    set_view(s, angle=0, height=height, scale=(sy, sy))
+    f = floor(s)
+    assert floor_row(height, sy) == row
+    assert (f[F_BUILT_SY], f[F_ROW]) == (max(sy, 1), row)
+    z = line_z(row)
+    assert list(f[F_LINE_Z:F_LINE_DIST])[:len(z)] == z
+
+
+@pytest.mark.parametrize("scale", [(56, 64), (80, 64), (64, 40), (10, 64), (200, 64)])
+@pytest.mark.parametrize("angle", [10, 150, 200, 64])
+def test_stretched_rows(flyer, angle, scale):
+    """Unequal scales stretch the floor across: four products a row, A and
+    C from |cos| and |sin| times scale_y / scale_x (clamped to ½..2), B and
+    D as unstretched. The floor height comes from scale_y alone."""
+    s = flyer
+    set_view(s, angle=angle, height=72, scale=scale)
+    row = floor_row(72, scale[1])
+    q, px = lateral(*scale)
+    f = floor(s)
+    assert word(f, F_LAT) & 0xFFFF == q and word(f, F_LAT + 2) & 0xFFFF == px
+    _, k = shown_table(s, H_ABI)
+    ground = 224 - sky_of(row)
+    z = line_z(row)[:ground]
+    ab, cd = rows(s, H_AB, k), rows(s, H_CD, k)
+    cos, sin = SINCOS[angle + 64], SINCOS[angle]
+    c7, s7 = abs(cos) >> 1, abs(sin) >> 1
+    lc, ls = stretch(c7, q), stretch(s7, q)
+    for l, zz in enumerate(z):
+        la, lb = (zz * lc) >> 5, (zz * ls) >> 5
+        fa, fb = (zz * c7) >> 5, (zz * s7) >> 5
+        if cos < 0:
+            la, fa = -la, -fa
+        if sin < 0:
+            fb, lb = -fb, -lb
+        assert (ab[2 * l], ab[2 * l + 1], cd[2 * l], cd[2 * l + 1]) == (la, fb, -lb, fa), l
+
+
 @pytest.mark.parametrize("angle", [10, 70, 150, 160, 200, 64, 128, 192])
 def test_floor_matrix_signs(flyer, angle):
     """dizworld's signs: A = D, C = -B, from |cos| and |sin| scaled by z,
     in every quadrant and on the axes (each quadrant has its own loop)."""
     s = flyer
-    set_view(s, angle=angle, height=40)
+    set_view(s, angle=angle, row=40)
     _, k = shown_table(s, H_ABI)
     sky = sky_of(40)
     ground = 224 - sky
@@ -216,7 +294,7 @@ def test_buffers_swap_and_shown_one_is_whole(flyer):
     """Each finished build is shown and the other buffer written next; the
     one HDMA reads is complete at every frame, whatever `build` is doing."""
     s = flyer
-    set_view(s, angle=0, height=64)
+    set_view(s, angle=0, row=64)
     sky, ground = sky_of(64), 224 - sky_of(64)
     backs = set()
     for _ in range(8):
@@ -229,7 +307,7 @@ def test_buffers_swap_and_shown_one_is_whole(flyer):
 
 def test_horizon_split(flyer):
     s = flyer
-    set_view(s, angle=0, height=100)
+    set_view(s, angle=0, row=100)
     sky = sky_of(100)
     back = hdma(s)[H_BACK] ^ 1
     bgm = band_table(s, B_BGM, B_STRIDE, back)
@@ -247,12 +325,15 @@ def test_horizon_split(flyer):
     assert list(bands(s)[B_FADE:B_FADE + 17]) == [fade()[0]] + fade()[17:33]
 
 
-def test_floor_projection(flyer):
+@pytest.mark.parametrize("scale", [(64, 64), (56, 64), (80, 64)])
+def test_floor_projection(flyer, scale):
     """Unrotated, the camera at (512, 512): an object straight ahead lands
     in the center column on the line whose distance is nearest below its
-    own; one behind the camera is hidden."""
+    own, and one to the side as far across as the line's texels, stretched
+    by the scales, put it; one behind the camera is hidden."""
     s = flyer
-    set_view(s, angle=0, height=64)
+    set_view(s, angle=0, row=64, scale=scale)
+    _, px = lateral(*scale)
     sky = sky_of(64)
     ground = 224 - sky
     z = line_z(64)
@@ -266,7 +347,10 @@ def test_floor_projection(flyer):
             continue
         line = next(l for l in range(ground) if dist[l] <= f)
         assert sy == sky + line, i
-        assert abs(sx - (128 + r * RECIP[z[line]] // 256)) <= 1, i
+        size = RECIP[z[line]]
+        if px != 0x100:
+            size = stretch(size, px)
+        assert abs(sx - (128 + r * size // 256)) <= 1, i
 
 
 def screen(s, tmp_path, name):
@@ -299,7 +383,7 @@ def test_pitch_moves_the_split(flyer, pitch, shown):
     -32..64 by the floor, in its state, its indirect table and the BGMODE
     split alike."""
     s = flyer
-    set_view(s, angle=0, height=64, pitch=pitch)
+    set_view(s, angle=0, row=64, pitch=pitch)
     f = floor(s)
     sky = sky_of(64) + shown
     ground = 224 - sky
@@ -320,7 +404,7 @@ def test_pitch_leaves_the_line_tables(flyer):
     s = flyer
     tables = []
     for pitch in (-32, 0, 64):
-        set_view(s, angle=0, height=64, pitch=pitch)
+        set_view(s, angle=0, row=64, pitch=pitch)
         f = floor(s)
         tables.append(f[F_LINE_Z:F_LINE_DIST + 448])
         sky = sky_of(64) + pitch
@@ -332,11 +416,11 @@ def test_pitch_moves_projection_by_whole_lines(flyer):
     """A floor point visible at pitch 0 and at pitch p keeps its sx and
     moves exactly p lines down."""
     s = flyer
-    set_view(s, angle=0, height=64, pitch=0)
+    set_view(s, angle=0, row=64, pitch=0)
     flat = object_screen(s)
     moved = 0
     for pitch in (-32, 20, 64):
-        set_view(s, angle=0, height=64, pitch=pitch)
+        set_view(s, angle=0, row=64, pitch=pitch)
         pos = object_screen(s)
         for i in range(5):
             if flat[2 * i + 1] == HIDDEN or pos[2 * i + 1] == HIDDEN:
