@@ -1,14 +1,11 @@
-//! mode7kit bands: the screen split into runs of lines, each with its own
-//! BG mode and main-screen layers, and an optional haze.
+//! Bands: the screen split into runs of lines, each with its own BG mode
+//! and main-screen layers, and an optional haze. This ROM's own code, on
+//! mode7kit's transport; mode7kit itself has no bands.
 //!
-//! Includes `core.r65`. Adds `M7K_FADE` (33 bytes). `m7k_bands!` writes a
-//! bands type: per-line BGMODE and TM (and COLDATA for the haze) by
-//! direct-mode HDMA, double-buffered with a transport and shown on its
-//! `commit()`. A sky band in Mode 1 over a Mode 7 floor is `Horizon`
-//! (`horizon_bg.r65`); a HUD band under the floor is one more band.
-//!
-//! The default instance is `M7Bands` (state `M7K_BANDS`): up to 3 bands
-//! on channels 4 (BGMODE), 5 (TM) and 6 (COLDATA), with `M7HDMA`.
+//! Includes mode7kit's `core.r65`. Adds `M7K_FADE` (33 bytes).
+//! `m7k_bands!` writes a bands type: per-line BGMODE and TM (and COLDATA
+//! for the haze) by direct-mode HDMA, double-buffered with a transport and
+//! shown on its `commit()`.
 //!
 //! ```
 //! m7k_bands!(Two, TWO, M7HDMA, 2, 4, 5);       // 2 bands, no COLDATA
@@ -297,6 +294,3 @@ macro_rules! m7k_bands_impl($name:ident, $state:ident, $hdma:ident, $max:expr, $
         }
     }
 }
-
-// The default bands: up to 3, channels 4, 5 and 6, with `M7HDMA`.
-m7k_bands!(M7Bands, M7K_BANDS, M7HDMA, 3, 4, 5, 6);

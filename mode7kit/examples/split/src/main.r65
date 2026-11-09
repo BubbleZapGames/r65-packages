@@ -1,9 +1,9 @@
 //! mode7kit split example: two perspective floors on one screen, each
 //! following its own camera, as in a two-player racer.
 //!
-//! `views.r65`: the default floor `M7Floor` follows `M7K_CAMERA` in the
-//! top half; a second instance, `FloorB`, follows `CAM_B` in the bottom
-//! half. `Split` (`m7k_split!`) stacks them, with a sky band in each half
+//! `src/split.r65` (this example's own): the default floor `M7Plain`
+//! follows `M7K_CAMERA` in the top half; a second instance, `FloorB`,
+//! follows `CAM_B` in the bottom half. `Split` (`m7k_split!`) stacks them, with a sky band in each half
 //! (bands `Bands4`, four of them, no COLDATA) and each band's BG1 view by
 //! HDMA (`M7Views`): the sky is BG1 in Mode 1, so each half's sky scrolls
 //! with its own camera. Pad 1: D-pad left/right turn and up/down fly the
@@ -18,7 +18,7 @@
 
 include!("stdlib/65816.r65")
 include!("stdlib/sneslib.r65")
-include!("mode7kit/views.r65")
+include!("split.r65")
 
 #[bank(0)]
 
@@ -28,15 +28,15 @@ const VRAM_SKY_MAP: u16 = 0x6C00;
 /// The bottom half's camera, facing the other way.
 #[lowram]
 static mut CAM_B: M7Camera = M7Camera {
-    x: M7Coord(0x8000), y: M7Coord(0x8000), angle: 128,
+    x: M7Coord(0x8000), y: M7Coord(0x8000), angle: 128, height: 64, pitch: 0,
 };
 
-/// The bottom half's floor, over the same transport as `M7Floor`.
-m7k_floor!(FloorB, FLOOR_B, M7HDMA, M7K_HDMA, m7k_rows_mul);
+/// The bottom half's floor, over the same transport as `M7Plain`.
+m7k_plain!(FloorB, FLOOR_B, M7HDMA, M7K_HDMA, m7k_rows_mul);
 /// Four bands, a sky and a floor per half; no haze, so no COLDATA channel.
 m7k_bands!(Bands4, BANDS4, M7HDMA, 4, 4, 5);
 /// The two floors stacked.
-m7k_split!(Split, SPLIT, M7HDMA, Bands4, M7Views, M7Floor, FloorB);
+m7k_split!(Split, SPLIT, M7HDMA, Bands4, M7Views, M7Plain, FloorB);
 
 struct Game {
     frames: u16,
@@ -88,8 +88,8 @@ fn main() -> ! {
     set_bg1_map!(0x1B, 0);           // BG1 map at word $6C00
 
     // looking down a little, so each 112-line half shows more floor
-    M7Floor::set_pitch(-24);
-    FloorB::set_pitch(-24);
+    M7K_CAMERA.set_pitch(-24);
+    CAM_B.set_pitch(-24);
     FloorB::set_camera(&CAM_B);
     Split::set_sky(BG::Mode1, 0x01, 0x01);           // Mode 1 sky and Mode 7 floors, both BG1
     Split::setup(M7Repeat::Wrap, M7Flip::None);

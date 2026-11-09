@@ -1,10 +1,11 @@
-//! mode7kit horizon background: a sky band in another BG mode above a
-//! per-line floor, an optional haze under the horizon, and an optional HUD
-//! band under the floor.
+//! A horizon background, this ROM's own code on mode7kit: a sky band in
+//! another BG mode above a per-line floor, an optional haze under the
+//! horizon, and an optional HUD band under the floor.
 //!
-//! Includes `floor.r65` and `bands.r65`. `m7k_horizon!` writes a background
-//! for a floor (any `Mode7Scan`, such as `m7k_floor!`'s), over bands
-//! (`m7k_bands!`): the sky, the floor and the HUD. It is not a `Mode7`: the
+//! Includes mode7kit's `plain.r65` and this ROM's `bands.r65`.
+//! `m7k_horizon!` writes a background for a floor (any `Mode7Scan`, such as
+//! `m7k_plain!`'s), over bands (`m7k_bands!`): the sky, the floor and the
+//! HUD. It is not a `Mode7`: the
 //! game drives the floor, which is its view, and the background reads the
 //! floor's last build (`begin()`, `end()`, `camera()`) to put the sky
 //! above the horizon and turn the sky with the view.
@@ -13,33 +14,30 @@
 //! with, so the game splits the floor's `update()` around `update()` here.
 //! With a HUD, the floor builds the lines above it, `224 - hud`.
 //!
-//! The default instance is `Horizon` (state `M7K_HORIZON`) for `M7Floor`,
-//! with `M7Bands`: HDMA channels 2-3 for the matrix, 4-6 for the bands.
-//!
 //! ```
-//! include!("mode7kit/horizon_bg.r65")
+//! include!("horizon.r65")
 //!
-//! M7Floor::setup(M7Repeat::Wrap, M7Flip::None);
+//! M7Plain::setup(M7Repeat::Wrap, M7Flip::None);
 //! Horizon::set_sky(BG::Mode1, 0x12, 0x11);   // Mode 1 sky: BG2+OBJ; floor: BG1+OBJ
 //! Horizon::setup();
 //! loop {
 //!     wait_nmi!();
-//!     M7Floor::build(0, 224);
+//!     M7Plain::build(0, 224);
 //!     Horizon::update();
-//!     M7Floor::publish();
-//!     let sx, sy, size = M7Floor::to_screen(enemy_x, enemy_y);
+//!     M7Plain::publish();
+//!     let sx, sy, size = M7Plain::to_screen(enemy_x, enemy_y);
 //! }
 //!
 //! #[interrupt(nmi)]
 //! fn vblank() {
-//!     M7Floor::nmi();
+//!     M7Plain::nmi();
 //!     Horizon::nmi();
 //!     let hofs, vofs = Horizon::sky_scroll();   // the game's BG2 scroll
 //! }
 //! ```
 
-include!("mode7kit/floor.r65")
-include!("mode7kit/bands.r65")
+include!("mode7kit/plain.r65")
+include!("bands.r65")
 
 /// `$name`, the background for floor `$floor` (any `Mode7Scan`) with bands
 /// `$bands` (at least 3 bands for a HUD, a COLDATA channel for the haze),
@@ -145,5 +143,8 @@ macro_rules! m7k_horizon($name:ident, $state:ident, $floor:ident, $bands:ident) 
     }
 }
 
-// The default background: `M7Floor` with `M7Bands`.
-m7k_horizon!(Horizon, M7K_HORIZON, M7Floor, M7Bands);
+// This ROM's bands: up to 3, channels 4, 5 and 6, with `M7HDMA`.
+m7k_bands!(M7Bands, M7K_BANDS, M7HDMA, 3, 4, 5, 6);
+
+// The sky over `M7Plain`, on `M7Bands`.
+m7k_horizon!(Horizon, M7K_HORIZON, M7Plain, M7Bands);

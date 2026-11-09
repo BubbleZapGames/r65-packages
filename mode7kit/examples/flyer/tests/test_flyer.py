@@ -2,7 +2,7 @@
 example ROM.
 
 Each test sets a view by writing mode7kit's state (the camera's heading,
-`M7Floor`'s height and pitch) or pressing the example's buttons, lets the
+height and pitch) or pressing the example's buttons, lets the
 frame run, and checks the state that follows against the same formulas in
 Python: the compile-time tables, the HDMA tables the floor and the horizon
 split are built in, and the floor projection.
@@ -14,10 +14,10 @@ import pytest
 # Struct offsets (packed, declaration order).
 H_SEL, H_CY, H_VOFS, H_BACK, H_READY, H_HDMAEN = 0, 3, 7, 9, 10, 11   # M7HDMA
 H_TOP, H_ABI, H_CDI, H_AB, H_CD = 13, 21, 85, 149, 1941
-F_HEIGHT, F_PITCH, F_SKY, F_GROUND, F_FOOT = 0, 1, 3, 4, 5            # M7Floor
-F_CY, F_VOFS, F_LINE_Z, F_LINE_DIST = 16, 20, 22, 470
+F_SKY, F_GROUND, F_FOOT, F_BUILT_HEIGHT = 1, 2, 3, 4                 # M7Plain
+F_CY, F_VOFS, F_LINE_Z, F_LINE_DIST = 14, 18, 20, 468
 B_BGM, B_TMT, B_COL, B_FADE, B_STRIDE, B_COL_STRIDE = 11, 37, 63, 107, 13, 22  # M7Bands
-CAM_ANGLE = 4                                                          # M7Camera
+CAM_ANGLE, CAM_HEIGHT, CAM_PITCH = 4, 5, 6                             # M7Camera
 PITCH_DOWN, PITCH_UP = 32, 64
 DATA_WORDS = 448                 # one buffer of rows: 224 lines x A, B (or C, D)
 IND = 32                         # one buffer of an indirect table
@@ -93,9 +93,9 @@ def set_view(s, angle=None, height=None, pitch=None):
     if angle is not None:
         s.write(s.resolve("M7K_CAMERA") + CAM_ANGLE, angle & 0xFF)
     if height is not None:
-        s.write(s.resolve("M7K_FLOOR") + F_HEIGHT, height)
+        s.write(s.resolve("M7K_CAMERA") + CAM_HEIGHT, height)
     if pitch is not None:
-        s.write(s.resolve("M7K_FLOOR") + F_PITCH, pitch & 0xFF)
+        s.write(s.resolve("M7K_CAMERA") + CAM_PITCH, pitch & 0xFF)
     # a frame can take two vblanks: wait out the pass that read the old
     # values, then a whole one with the new
     s.wait(6)
@@ -106,7 +106,11 @@ def hdma(s):
 
 
 def floor(s):
-    return s.raw("M7K_FLOOR").bytes()
+    return s.raw("M7K_PLAIN").bytes()
+
+
+def camera(s):
+    return s.raw("M7K_CAMERA").bytes()
 
 
 def bands(s):
@@ -162,7 +166,7 @@ def test_floor_tables(flyer):
     set_view(s, angle=0, height=64)
     f = floor(s)
     sky, ground = sky_of(64), 224 - sky_of(64)
-    assert (f[F_SKY], f[F_GROUND], f[F_HEIGHT]) == (sky, ground, 64)
+    assert (f[F_SKY], f[F_GROUND], f[F_BUILT_HEIGHT]) == (sky, ground, 64)
     assert f[F_FOOT] == foot_of(64) == ground + PITCH_DOWN
     z = line_z(64)
     assert words(f[F_LINE_Z:F_LINE_DIST], signed=False)[:len(z)] == z
@@ -291,14 +295,15 @@ def test_vertical_flip_dropped_on_floor_but_kept(flyer, tmp_path):
 
 @pytest.mark.parametrize("pitch,shown", [(0, 0), (-32, -32), (64, 64), (-60, -32), (100, 64)])
 def test_pitch_moves_the_split(flyer, pitch, shown):
-    """The horizon is 32 + h/2 + pitch, the pitch clamped to -32..64, in the
-    state, the floor's indirect table and the BGMODE split alike."""
+    """The horizon is 32 + h/2 + pitch, the camera's pitch clamped to
+    -32..64 by the floor, in its state, its indirect table and the BGMODE
+    split alike."""
     s = flyer
     set_view(s, angle=0, height=64, pitch=pitch)
     f = floor(s)
     sky = sky_of(64) + shown
     ground = 224 - sky
-    assert (s16(f[F_PITCH] << 8) >> 8, f[F_SKY], f[F_GROUND]) == (shown, sky, ground)
+    assert (f[F_SKY], f[F_GROUND]) == (sky, ground)
     t, k = shown_table(s, H_ABI)
     entries, i, lines = [], 0, 0
     while t[i]:
@@ -345,6 +350,6 @@ def test_pitch_buttons(flyer):
     """X looks up and B looks down, two lines a frame, held at the limits."""
     s = flyer
     s.hold("x", frames=60).wait(2)
-    assert floor(s)[F_PITCH] == PITCH_UP
+    assert camera(s)[CAM_PITCH] == PITCH_UP
     s.hold("b", frames=80).wait(2)
-    assert s16(floor(s)[F_PITCH] << 8) >> 8 == -PITCH_DOWN
+    assert s16(camera(s)[CAM_PITCH] << 8) >> 8 == -PITCH_DOWN

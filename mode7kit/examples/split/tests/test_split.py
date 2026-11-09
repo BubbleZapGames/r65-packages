@@ -11,7 +11,7 @@ import pytest
 from PIL import Image
 
 CAM_X, CAM_Y, CAM_ANGLE = 0, 2, 4                     # M7Camera
-F_SKY, F_GROUND = 3, 4                                # M7Floor, FloorB
+F_SKY, F_GROUND = 1, 2                                # M7Plain, FloorB
 H_BACK, H_HDMAEN = 9, 11                              # M7HDMA
 V_CTR, V_SCR, V_STRIDE = 37, 119, 41                  # M7Views (4 views)
 HALF = 112
@@ -92,7 +92,7 @@ def test_horizons_and_bands(split):
     """Each floor's horizon sits in its own half (the pitch -24 at height
     64); the BGMODE table switches 1, 7, 1, 7 at the two horizons."""
     s = split
-    a, b = s.raw("M7K_FLOOR").bytes(), s.raw("FLOOR_B").bytes()
+    a, b = s.raw("M7K_PLAIN").bytes(), s.raw("FLOOR_B").bytes()
     sky = sky_of(64) - 24
     assert (a[F_SKY], a[F_GROUND]) == (sky, HALF - sky)
     assert (b[F_SKY], b[F_GROUND]) == (HALF + sky, HALF - sky)

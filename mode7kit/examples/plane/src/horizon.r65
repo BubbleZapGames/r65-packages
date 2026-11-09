@@ -1,0 +1,150 @@
+//! A horizon background, this ROM's own code on mode7kit: a sky band in
+//! another BG mode above a per-line floor, an optional haze under the
+//! horizon, and an optional HUD band under the floor.
+//!
+//! Includes mode7kit's `plain.r65` and this ROM's `bands.r65`.
+//! `m7k_horizon!` writes a background for a floor (any `Mode7Scan`, such as
+//! `m7k_plain!`'s), over bands (`m7k_bands!`): the sky, the floor and the
+//! HUD. It is not a `Mode7`: the
+//! game drives the floor, which is its view, and the background reads the
+//! floor's last build (`begin()`, `end()`, `camera()`) to put the sky
+//! above the horizon and turn the sky with the view.
+//!
+//! The bands must be ready before the floor publishes the frame they go
+//! with, so the game splits the floor's `update()` around `update()` here.
+//! With a HUD, the floor builds the lines above it, `224 - hud`.
+//!
+//! ```
+//! include!("horizon.r65")
+//!
+//! M7Plain::setup(M7Repeat::Wrap, M7Flip::None);
+//! Horizon::set_sky(BG::Mode1, 0x12, 0x11);   // Mode 1 sky: BG2+OBJ; floor: BG1+OBJ
+//! Horizon::setup();
+//! loop {
+//!     wait_nmi!();
+//!     M7Plain::build(0, 224);
+//!     Horizon::update();
+//!     M7Plain::publish();
+//!     let sx, sy, size = M7Plain::to_screen(enemy_x, enemy_y);
+//! }
+//!
+//! #[interrupt(nmi)]
+//! fn vblank() {
+//!     M7Plain::nmi();
+//!     Horizon::nmi();
+//!     let hofs, vofs = Horizon::sky_scroll();   // the game's BG2 scroll
+//! }
+//! ```
+
+include!("mode7kit/plane_rotation.r65")
+include!("bands.r65")
+
+/// `$name`, the background for floor `$floor` (any `Mode7Scan`) with bands
+/// `$bands` (at least 3 bands for a HUD, a COLDATA channel for the haze),
+/// on the floor's transport. Its state, the `#[lowram]` static `$state`,
+/// takes 15 bytes.
+macro_rules! m7k_horizon($name:ident, $state:ident, $floor:ident, $bands:ident) {
+    /// The bands' configuration, and the sky scroll per transport buffer.
+    struct $name {
+        sky_mode: BG,
+        sky_tm: u8,
+        ground_tm: u8,
+        haze: bool,
+        /// The HUD band's lines (0: none), BGMODE and TM.
+        hud: u8,
+        hud_mode: BG,
+        hud_tm: u8,
+        /// The sky layer's scroll for the frame in each buffer.
+        hofs: [u16; 2],
+        vofs: [u16; 2],
+    }
+
+    #[lowram]
+    static mut $state: $name = $name {
+        sky_mode: BG::Mode1, sky_tm: 0x02, ground_tm: 0x01, haze: false,
+        hud: 0, hud_mode: BG::Mode1, hud_tm: 0x04,
+        hofs: [0, 0], vofs: [176, 176],
+    };
+
+    impl $name {
+        /// The BG mode above the horizon, and the main-screen layers (TM)
+        /// on each side. Before `setup`.
+        fn set_sky(sky_mode: BG, sky_tm: u8, ground_tm: u8) {
+            $state.sky_mode = sky_mode;
+            $state.sky_tm = sky_tm;
+            $state.ground_tm = ground_tm;
+        }
+
+        /// With `on`, colour math adds a fading fixed colour to BG1 just
+        /// under the horizon. Before `setup`.
+        fn set_haze(on: bool) {
+            $state.haze = on;
+        }
+
+        /// A band of `lines` lines at the bottom of the screen with its own
+        /// BG mode and TM, for a HUD (0 lines: none). The floor builds the
+        /// lines above it. Before `setup`.
+        fn set_hud(lines: u8, mode: BG, tm: u8) {
+            $state.hud = lines;
+            $state.hud_mode = mode;
+            $state.hud_tm = tm;
+        }
+
+        /// The bands: the sky split at line 64, the floor, the HUD. After
+        /// the floor's `setup`, which the bands' channels join.
+        fn setup() {
+            let hud: u8 = $state.hud;
+            $bands::set_band(0, 64, $state.sky_mode, $state.sky_tm);
+            $bands::set_band(1, 160 - hud, BG::Mode7, $state.ground_tm);
+            if hud != 0 {
+                $bands::set_band(2, hud, $state.hud_mode, $state.hud_tm);
+                $bands::set_count(3);
+            } else {
+                $bands::set_count(2);
+            }
+            if $state.haze { $bands::set_haze(1); } else { $bands::set_haze(M7K_NO_HAZE); }
+            $bands::setup();
+        }
+
+        /// The bands' stop. BGMODE, TM and COLDATA keep the last values
+        /// their tables wrote. The floor stops on its own.
+        fn stop() {
+            $bands::stop();
+        }
+
+        /// The bands and the sky scroll for the floor's last build: the sky
+        /// over the lines above its rows, the floor over its rows. After
+        /// the floor's `build`, before its `publish`.
+        fn update() {
+            let begin: u8 = $floor::begin();
+            $bands::set_lines(0, begin);
+            $bands::set_lines(1, $floor::end() - begin);
+            $bands::fill_back();
+            let k: u16 = $bands::back_index() as u16;
+            let cam: *M7Camera = $floor::camera();
+            $state.hofs[k] = (0 - ((cam.angle as u16) << 2)) & 0x03FF;
+            $state.vofs[k] = 240 - begin as u16;
+        }
+
+        /// Shows the bands of the frame on screen. From the NMI handler,
+        /// after the floor's `nmi()`.
+        fn nmi() {
+            $bands::show($bands::front_index());
+        }
+
+        /// The sky layer's scroll for the frame on screen: horizontal
+        /// parallax that turns with the view, and the vertical offset that
+        /// puts the bottom of a 240-line sky on the horizon. Call from the
+        /// NMI handler, after `nmi()`.
+        fn sky_scroll() -> u16, u16 {
+            let k: u16 = $bands::front_index() as u16;
+            return $state.hofs[k], $state.vofs[k];
+        }
+    }
+}
+
+// This ROM's bands: up to 3, channels 4, 5 and 6, with `M7HDMA`.
+m7k_bands!(M7Bands, M7K_BANDS, M7HDMA, 3, 4, 5, 6);
+
+// The sky over `M7PlaneRotation`, on `M7Bands`.
+m7k_horizon!(Horizon, M7K_HORIZON, M7PlaneRotation, M7Bands);

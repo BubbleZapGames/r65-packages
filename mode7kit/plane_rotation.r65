@@ -1,0 +1,459 @@
+//! mode7kit plane rotation: a perspective plane at a true pitch angle, one
+//! matrix a scanline.
+//!
+//! Includes `core.r65`, whose `M7K_ZRECIP` it reads. Adds no table of its
+//! own.
+//!
+//! `m7k_plane_rotation!` writes a view type implementing `Mode7Scan`, and
+//! so `Mode7`, like `m7k_plain!`'s. It differs in the pitch: it reads the
+//! camera's `pitch` as an angle, 256 a turn (6..64: about 8° down to
+//! straight down), and rebuilds its line tables for it, so the ground's
+//! foreshortening changes with the tilt as a real camera's does. Straight
+//! down, every line shares one matrix and the view publishes one held row.
+//! The default instance is `M7PlaneRotation` (state `M7K_PLANE_ROTATION`)
+//! over `M7HDMA`, the whole screen.
+//!
+//! ```
+//! include!("mode7kit/plane_rotation.r65")
+//!
+//! M7PlaneRotation::setup(M7Repeat::Wrap, M7Flip::None);    // force blank
+//! loop {
+//!     wait_nmi!();
+//!     M7K_CAMERA.tilt(1);                          // look further down
+//!     M7PlaneRotation::update();
+//!     let sx, sy, size = M7PlaneRotation::to_screen(enemy_x, enemy_y);
+//! }
+//!
+//! #[interrupt(nmi)]
+//! fn vblank() { M7PlaneRotation::nmi(); }
+//! ```
+//!
+//! The row builder drives the hardware multiplier directly: an NMI
+//! handler running mid-frame must not use it (`mul8`, `div16`...).
+
+include!("mode7kit/core.r65")
+
+/// The pitch range the plane takes. Below 6 (8.4°) the point under the
+/// camera, the matrix pivot, is more than 1023 lines below the screen's
+/// center: past the range Mode 7's vertical offset term holds.
+const M7K_PLANE_PITCH_MIN: i8 = 6;
+const M7K_PLANE_PITCH_MAX: i8 = 64;
+
+/// The far clip: the 1/Z interpolant where z reaches 128 (two texels a
+/// pixel). Lines farther than it are sky.
+const M7K_PLANE_CLIP: i16 = 4096;
+
+// ============================================================================
+// ROW BUILDER
+// ============================================================================
+//
+// A plane instance names its row builder: `$n` rows into transport state
+// `$hstate` from element `$k`, from plane state `$fstate`'s depth scales.
+// `$c`, `$s` are the heading's |cos| and |sin| and `$neg_c`, `$neg_s`
+// their signs; the pitch's sin (8.8) is the state's `sin_t`. Row l, z = line_z[l]:
+// A = ±z·|cos|, C = ∓z·|sin| (lateral); B = ±z·sin θ·|sin|,
+// D = ±z·sin θ·|cos| (forward); each >> 6 from 1.7 factors, as the floor's.
+
+/// The row builder on the hardware multiplier: four 8×8 products a row.
+/// WRMPYA keeps z, so each product after the first is one WRMPYB store.
+macro_rules! m7k_plane_rows_mul($hstate:ident, $fstate:ident, $k:expr, $n:expr, $c:expr, $s:expr, $neg_c:expr, $neg_s:expr) {
+    // the four factors as 1.7 bytes: |cos|/2, |sin|/2, and them times sin θ
+    let m7k_lc: u16 = ($c >> 1) << 8;
+    let m7k_ls: u16 = $s >> 1;
+    let m7k_fc: u16 = m7k_mul_q8($fstate.sin_t, $c) >> 1;
+    let m7k_fs: u16 = m7k_mul_q8($fstate.sin_t, $s) >> 1;
+    let m7k_k0: u16 = $k;
+    let m7k_n: u16 = $n;
+    if $neg_c {
+        if $neg_s {
+            m7k_plane_rows_q!($hstate, $fstate, m7k_k0, m7k_n, m7k_lc, m7k_ls, m7k_fc, m7k_fs, 0 - la, 0 - fb, lb, 0 - fa);
+        } else {
+            m7k_plane_rows_q!($hstate, $fstate, m7k_k0, m7k_n, m7k_lc, m7k_ls, m7k_fc, m7k_fs, 0 - la, fb, 0 - lb, 0 - fa);
+        }
+    } else {
+        if $neg_s {
+            m7k_plane_rows_q!($hstate, $fstate, m7k_k0, m7k_n, m7k_lc, m7k_ls, m7k_fc, m7k_fs, la, 0 - fb, lb, fa);
+        } else {
+            m7k_plane_rows_q!($hstate, $fstate, m7k_k0, m7k_n, m7k_lc, m7k_ls, m7k_fc, m7k_fs, la, fb, 0 - lb, fa);
+        }
+    }
+}
+
+/// One quadrant's loop: A = `$xa`, B = `$xb`, C = `$xc`, D = `$xd`, from
+/// the lateral products `la`, `lb` and the forward ones `fa`, `fb`.
+macro_rules! m7k_plane_rows_q($hstate:ident, $fstate:ident, $k:ident, $n:ident, $lc:ident, $ls:ident, $fc:ident, $fs:ident, $xa:expr, $xb:expr, $xc:expr, $xd:expr) {
+    let mut m7k_k: u16 = $k;
+    let m7k_end: u16 = $k + ($n << 1);
+    let mut m7k_l: u16 = 0;
+    while m7k_k < m7k_end {
+        let z: u16 = $fstate.line_z[m7k_l];
+        WRMPY = z | $lc;
+        NOP(4);
+        let la: i16 = (RDMPY >> 5) as i16;
+        M7K_WRMPYB = $ls;
+        NOP(4);
+        let lb: i16 = (RDMPY >> 5) as i16;
+        M7K_WRMPYB = $fc;
+        NOP(4);
+        let fa: i16 = (RDMPY >> 5) as i16;
+        M7K_WRMPYB = $fs;
+        NOP(4);
+        let fb: i16 = (RDMPY >> 5) as i16;
+        $hstate.ab[m7k_k] = $xa;
+        $hstate.ab[m7k_k + 1] = $xb;
+        $hstate.cd[m7k_k] = $xc;
+        $hstate.cd[m7k_k + 1] = $xd;
+        m7k_k = m7k_k + 2;
+        m7k_l++;
+    }
+}
+
+// ============================================================================
+// THE PLANE
+// ============================================================================
+
+/// `$name`, a plane at a true pitch following a camera (`M7K_CAMERA` until
+/// its `set_camera`), building its rows into transport `$hdma` (state
+/// `$hstate`) with row builder `$rows` (`m7k_plane_rows_mul`). Its state,
+/// the `#[ram]` static `$state`, takes 947 bytes.
+macro_rules! m7k_plane_rotation($name:ident, $state:ident, $hdma:ident, $hstate:ident, $rows:ident) {
+    /// A plane's state.
+    struct $name {
+        /// The last build's band: its top line, its horizon (a screen
+        /// line), its ground lines.
+        top: u8,
+        sky: u8,
+        ground: u8,
+        /// The line tables': the height and pitch they were built for
+        /// (0xFF: none), a count of rebuilds, the full screen's first
+        /// ground line, the screen line of the point under the camera
+        /// (the matrix pivot), sin θ (8.8), and whether the view is
+        /// straight down (one matrix for every line).
+        built_height: u8,
+        built_pitch: u8,
+        gen: u8,
+        first: u8,
+        foot: u16,
+        sin_t: u16,
+        down: bool,
+        /// The last build's heading, for the projections.
+        angle: u8,
+        sin: i16,
+        cos: i16,
+        /// Forward distance of the last `to_screen` point, texels: sort
+        /// objects by it.
+        depth: i16,
+        /// The last build's center (texels) and scroll.
+        cx: u16,
+        cy: u16,
+        hofs: u16,
+        vofs: u16,
+        /// Per ground line of the full screen, from its first: the depth
+        /// scale z (64 a texel per pixel), and the forward distance
+        /// (texels, from the point under the camera; negative behind it)
+        /// the line's center shows.
+        line_z: [u16; 224],
+        line_dist: [i16; 224],
+        /// What each transport buffer holds of this plane, so a build that
+        /// would write the same skips it: its rows' heading, table
+        /// generation, band top, row count and transport stamp, and its
+        /// tables' horizon, ground lines, stamp and generation.
+        key_angle: [u8; 2],
+        key_gen: [u8; 2],
+        key_top: [u8; 2],
+        key_rows: [u8; 2],
+        key_stamp: [u8; 2],
+        key_sky: [u8; 2],
+        key_ground: [u8; 2],
+        key_tstamp: [u8; 2],
+        key_tgen: [u8; 2],
+        /// The camera the build follows.
+        camera: *M7Camera,
+        /// The screen line the matrix pivots on (the band's top plus
+        /// `foot`), and `to_screen`'s cull distance (texels): the farther
+        /// of the first and last line's, plus the far line's half width.
+        pivot: u16,
+        reach: u16,
+    }
+
+    #[ram]
+    static mut $state: $name = $name {
+        top: 0, sky: 0, ground: 0,
+        built_height: 0xFF, built_pitch: 0xFF, gen: 0, first: 0, foot: 112,
+        sin_t: 0, down: false,
+        angle: 0, sin: 0, cos: 0x100, depth: 0,
+        cx: 0, cy: 0, hofs: 0, vofs: 0,
+        line_z: [0; 224], line_dist: [0; 224],
+        key_angle: [0, 0], key_gen: [0xFF, 0xFF], key_top: [0, 0], key_rows: [0, 0],
+        key_stamp: [0, 0], key_sky: [0xFF, 0xFF], key_ground: [0, 0], key_tstamp: [0, 0],
+        key_tgen: [0xFF, 0xFF],
+        camera: &M7K_CAMERA,
+        pivot: 112, reach: 0,
+    };
+
+    impl Mode7 for $name {
+        /// The transport's setup: BGMODE 7, M7SEL and the matrix channels.
+        fn setup(repeat: M7Repeat, flip: M7Flip) {
+            $hdma::setup(repeat, flip);
+            $state.built_height = 0xFF;
+            $state.key_gen[0] = 0xFF;
+            $state.key_gen[1] = 0xFF;
+            $state.key_sky[0] = 0xFF;
+            $state.key_sky[1] = 0xFF;
+        }
+
+        fn set_camera(cam: *M7Camera) {
+            $state.camera = cam;
+        }
+
+        fn camera() -> *M7Camera {
+            return $state.camera;
+        }
+
+        /// Builds the plane over the whole transport from the camera (its
+        /// position, heading, height and pitch), and publishes it.
+        fn update() {
+            $name::build(0, $hdma::LINES as u8);
+            $name::publish();
+        }
+
+        /// Shows the frame `update` finished. Always writes HDMAEN.
+        fn nmi() {
+            let _flipped, _k = $hdma::commit();
+        }
+
+        /// The plane point (x, y) on screen, and the size of one texel
+        /// there (8.8 pixels). sy is `M7K_HIDDEN` for a point past the far
+        /// clip, below the screen or the band, or behind the camera. Its
+        /// forward distance, for sorting, is left for `depth()`. After the
+        /// build in the same frame.
+        fn to_screen(x: M7Coord, y: M7Coord) -> i16, i16, u16 {
+            m7k_scan_to_screen!($state, $hstate, x, y);
+        }
+
+        /// The plane point under screen pixel (sx, sy). The `bool` is false
+        /// above the horizon, below the band, more than 128 pixels from the
+        /// center column, or off the map under a repeat mode that doesn't
+        /// wrap. After the build in the same frame.
+        fn to_world(sx: i16, sy: i16) -> bool, M7Coord, M7Coord {
+            let cx: u16 = $state.cx;
+            let cy: u16 = $state.cy;
+            if sy < $state.sky as i16 || sy >= ($state.sky as u16 + $state.ground as u16) as i16 {
+                return false, M7Coord(cx << 6), M7Coord(cy << 6);
+            }
+            let mut x: i16 = sx;
+            if $hstate.sel & 0x01 != 0 { x = 255 - x; }
+            let l: u16 = ((sy as u8) - $state.sky) as u16;
+            let z: u8 = $state.line_z[l] as u8;
+            // pixels × z/64 texels per pixel, in 10.6: pixels × z
+            let xn, xm = m7k_abs(x - 128);
+            if xm > 128 {
+                return false, M7Coord(cx << 6), M7Coord(cy << 6);
+            }
+            let mut r: i16 = mul8(xm as u8, z) as i16;
+            if xn { r = 0 - r; }
+            // the forward distance in texels; turned, then to 10.6
+            let f: i16 = $state.line_dist[l];
+            let s: i16 = $state.sin;
+            let c: i16 = $state.cos;
+            let dx: i16 = m7k_smul_shr8(r, c) - (m7k_smul_shr8(f, s) << 6);
+            let dy: i16 = 0 - m7k_smul_shr8(r, s) - (m7k_smul_shr8(f, c) << 6);
+            let wraps: bool = $name::repeat().wraps();
+            let on: bool = m7k_on_map(wraps, cx, dx) && m7k_on_map(wraps, cy, dy);
+            return on, M7Coord((cx << 6) + dx as u16), M7Coord((cy << 6) + dy as u16);
+        }
+
+        fn sel() -> u8 {
+            return $hdma::sel();
+        }
+
+        fn set_sel(sel: u8) {
+            $hdma::set_sel(sel);
+        }
+    }
+
+    impl $name {
+        /// Leaves the plane: the transport's stop, which turns its
+        /// channels off at once. In vblank, straight after `wait_nmi!()`.
+        fn stop() {
+            $hdma::stop();
+        }
+
+        /// The forward distance of the last `to_screen` point, in texels.
+        fn depth() -> i16 {
+            return $state.depth;
+        }
+
+        // -- tables -------------------------------------------------------
+
+        /// The line tables for camera height `h` and pitch `t` (6..64).
+        ///
+        /// With H = 40 + h/2 texels, F = 128 pixels and v = line - 112, a
+        /// line meets the plane at lateral scale t = H / (F sin θ + v cos θ),
+        /// so 1/t is linear in v. The interpolant zr(v) = (4096 sin θ +
+        /// 32 v cos θ) / H indexes `M7K_ZRECIP` (zr >> 4) for z = 64·t, and
+        /// the line shows the ground floor(z·(128 cos θ - v sin θ) / 16384)
+        /// texels ahead of the point under the camera.
+        fn rebuild_lines(h: u8, t: u8) {
+            let hh: u8 = 40 + (h >> 1);
+            let s: u16 = m7k_sin(t) as u16;
+            let c: u16 = m7k_cos(t) as u16;
+            $state.sin_t = s;
+            $state.down = c == 0;
+
+            // zr at the center line, 4096·s/H, in two divisions: 4096·s
+            // overflows; and its step a line, 32·c/H, rounded
+            let q: u16 = div16(s << 6, hh);
+            let rm: u16 = mod16(s << 6, hh);
+            let zr_c: u16 = (q << 6) + div16(rm << 6, hh);
+            let step: u16 = div16((c << 5) + (hh >> 1) as u16, hh);
+
+            // the point under the camera, 128·cot θ below the center
+            if s >= 256 {
+                $state.foot = 112;
+            } else {
+                $state.foot = 112 + div16(c << 7, s as u8);
+            }
+
+            // the first line nearer than the far clip
+            let mut zs: i16 = zr_c as i16 - mul8(112, step as u8) as i16;
+            let mut y: u16 = 0;
+            if zs < M7K_PLANE_CLIP {
+                if step == 0 {
+                    y = 224;
+                } else {
+                    let need: u16 = (M7K_PLANE_CLIP - zs) as u16;
+                    y = div16(need + step - 1, step as u8);
+                    if y > 224 { y = 224; }
+                    zs = zs + mul8(y as u8, step as u8) as i16;
+                }
+            }
+            $state.first = y as u8;
+
+            // v·s at the first line, then a step of s a line
+            let vn, vm = m7k_abs(y as i16 - 112);
+            let mut vs: i16 = mul16(vm, s) as i16;
+            if vn { vs = 0 - vs; }
+            let c8: i16 = (c << 3) as i16;
+
+            // one table read a line, and the distance's two products: z by
+            // w = 8c - v·s/16 (1/16 pixels), / 1024. w is -1792..3840;
+            // biased by 2048 it is positive, and floor(z·(w + 2048)/1024)
+            // - 2z is floor(z·w/1024), with no sign to handle.
+            let mut zr: u16 = zs as u16;
+            let n: u16 = 224 - y;
+            let mut l: u16 = 0;
+            while l < n {
+                let mut zi: u16 = zr >> 4;
+                if zi > M7K_ZRECIP_LAST { zi = M7K_ZRECIP_LAST; }
+                let z: u16 = M7K_ZRECIP[zi] as u16;
+                let wb: u16 = (c8 - (vs >> 4) + 2048) as u16;
+                WRMPY = z | (wb << 8);
+                $state.line_z[l] = z;
+                zr = zr + step;
+                vs = vs + s as i16;
+                let p0: u16 = RDMPY;
+                M7K_WRMPYB = wb >> 8;
+                NOP(4);
+                let p1: u16 = RDMPY;
+                $state.line_dist[l] = ((((p0 >> 8) + p1) >> 2) - (z << 1)) as i16;
+                l++;
+            }
+            // the cull distance: the farther end of the view, and the far
+            // line's half width (128 pixels, 2z texels)
+            $state.reach = 0;
+            if n > 0 {
+                let _m7k_fn, far_d = m7k_abs($state.line_dist[0]);
+                let _m7k_nn, near_d = m7k_abs($state.line_dist[n - 1]);
+                let mut reach: u16 = far_d;
+                if near_d > reach { reach = near_d; }
+                $state.reach = reach + ($state.line_z[0] << 1);
+            }
+            $state.built_height = h;
+            $state.built_pitch = t;
+            $state.gen = $state.gen + 1;
+        }
+    }
+
+    impl Mode7Scan for $name {
+        /// The last build's horizon, a screen line: its rows start there.
+        fn begin() -> u8 {
+            return $state.sky;
+        }
+
+        /// The bottom of the last build's band.
+        fn end() -> u8 {
+            return $state.sky + $state.ground;
+        }
+
+        /// The ground lines: one row a line from row `top`, or, straight
+        /// down, row `top` held for all of them.
+        fn segment(p: u16) -> u16 {
+            if $state.down {
+                return $hdma::seg_hold(p, $state.top, $state.ground);
+            }
+            return $hdma::seg_rows(p, $state.top, $state.ground);
+        }
+
+        /// The last build's center (M7X, M7Y), in texels.
+        fn center() -> u16, u16 {
+            return $state.cx, $state.cy;
+        }
+
+        /// The last build's BG1 scroll (M7HOFS, M7VOFS).
+        fn scroll() -> u16, u16 {
+            return $state.hofs, $state.vofs;
+        }
+
+        /// Builds the band of `lines` lines from screen line `top` into the
+        /// transport's back buffer, without publishing: the horizon (the
+        /// full screen's, clamped to the band), the ground rows (rows
+        /// `top`...; one row straight down), the center and the scroll. A
+        /// shorter band shows the top of the full-screen plane, cropped.
+        /// Rows the buffer already holds for the same heading and tables
+        /// are kept.
+        fn build(top: u8, lines: u8) {
+            let cam: *M7Camera = $state.camera;
+            let mut h: u8 = cam.height;
+            if h > 127 { h = 127; }
+            let mut p: i8 = cam.pitch;
+            if p < M7K_PLANE_PITCH_MIN { p = M7K_PLANE_PITCH_MIN; }
+            if p > M7K_PLANE_PITCH_MAX { p = M7K_PLANE_PITCH_MAX; }
+            let t: u8 = p as u8;
+            if h != $state.built_height || t != $state.built_pitch {
+                $name::rebuild_lines(h, t);
+            }
+            let mut sky: u8 = $state.first;
+            if sky > lines { sky = lines; }
+            let horizon: u8 = top + sky;
+            $state.top = top;
+            $state.sky = horizon;
+            $state.ground = lines - sky;
+
+            // straight down, one row holds every line
+            let mut rows: u8 = $state.ground;
+            if $state.down && rows > 0 { rows = 1; }
+            // the pivot: the point under the camera, the full screen's line
+            // `foot`
+            $state.pivot = top as u16 + $state.foot;
+            m7k_scan_build_rows!($state, $hdma, $hstate, $rows, cam, top, rows);
+        }
+
+        /// Publishes the last full-screen build: the lines above the
+        /// horizon hold the transport's top matrix, the ground its rows.
+        /// Tables the buffer already holds for the same layout are kept.
+        fn publish() {
+            m7k_scan_publish!($name, $state, $hdma);
+        }
+
+        /// The transport's `commit()`, for an NMI handler that shows add-ons
+        /// with the frame.
+        fn commit() -> bool, u8 {
+            let flipped, k = $hdma::commit();
+            return flipped, k;
+        }
+    }
+}
+
+// The default plane: over `M7HDMA`, on the multiplier.
+m7k_plane_rotation!(M7PlaneRotation, M7K_PLANE_ROTATION, M7HDMA, M7K_HDMA, m7k_plane_rows_mul);

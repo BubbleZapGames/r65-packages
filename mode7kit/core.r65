@@ -2,20 +2,19 @@
 //! they share.
 //!
 //! A game picks a view by the type it uses: `M7Static` (`static.r65`), one
-//! matrix a frame, or a perspective floor (`M7Floor`, `floor.r65`), one
-//! matrix a scanline by HDMA, under a sky (`Horizon`) or in a split. Each
-//! implements `Mode7`, so a game's loop and sprite code read the same in
-//! any. This file holds the trait and `Mode7Scan`, the per-line views'
-//! trait; the M7SEL enums, the sin/cos table, the world coordinate and the
-//! camera (`M7Camera`, and `M7K_CAMERA`, the one every view follows until
-//! its `set_camera`); two stateless register writers, the DMA channel
-//! array, the fixed-point multiplies and the VRAM upload macros; and the
-//! transport.
+//! matrix a frame, or a perspective floor (`M7Plain`, `plain.r65`), one
+//! matrix a scanline by HDMA. Each implements `Mode7`, so a game's loop
+//! and sprite code read the same in any. This file holds the trait and
+//! `Mode7Scan`, the per-line views' trait; the M7SEL enums, the sin/cos
+//! and zoom reciprocal tables, the world coordinate and the camera (`M7Camera`, and
+//! `M7K_CAMERA`, the one every view follows until its `set_camera`); two
+//! stateless register writers, the DMA channel array, the fixed-point
+//! multiplies and the VRAM upload macros; and the transport.
 //!
 //! The transport, `m7k_hdma!`, carries one Mode 7 matrix a scanline by
 //! indirect HDMA: double-buffered per-line matrices, their indirect HDMA
 //! tables, M7SEL and the view, and the HDMAEN shadow. It does no math: a
-//! floor (`floor.r65`) or the game's own effect fills its rows, and
+//! floor (`plain.r65`) or the game's own effect fills its rows, and
 //! `commit()` shows them. The default instance is `M7HDMA` (state
 //! `M7K_HDMA`): 224 lines on channels 2 (M7A/M7B) and 3 (M7C/M7D). A game
 //! wanting fewer lines, other channels, or an effect of its own includes
@@ -189,6 +188,32 @@ fn m7k_heading(angle: u8, speed: u8) -> i16, i16 {
 }
 
 // ============================================================================
+// ZOOM
+// ============================================================================
+
+// A zoom is a `u8` per screen axis: 64 is 1.0×, 128 magnifies 2×, 16
+// shrinks to ¼×. Zoom is linear in on-screen size, so stepping it by one a
+// frame zooms smoothly. `M7K_RECIP` is 512 bytes of ROM, dropped from a
+// program that never scales.
+
+const fn m7k_build_recip() -> [u16; 256] {
+    let mut t: [u16; 256] = [0; 256];
+    t[0] = 0x7FFF;
+    for z in 1..256 {
+        t[z] = 16384 / (z as u16);
+    }
+    return t;
+}
+
+/// 16384 / zoom: texels per screen pixel (8.8) at that zoom.
+static M7K_RECIP: [u16; 256] = m7k_build_recip();
+
+/// Texels per screen pixel at `zoom`, 8.8.
+fn m7k_recip(zoom: u8) -> u16 {
+    return M7K_RECIP[zoom as u16];
+}
+
+// ============================================================================
 // THE CAMERA
 // ============================================================================
 
@@ -204,20 +229,33 @@ fn m7k_tile_index(x: M7Coord, y: M7Coord) -> u16 {
     return ((y.tile() as u16) << 7) | x.tile() as u16;
 }
 
-/// A world camera: the point a view is built around, and the way it faces
-/// (256 per turn; 0 looks toward -Y). Declare more as `#[lowram] static
-/// mut` for more views, and give each view its camera with
-/// `Mode7::set_camera`.
+/// The range of `M7Camera::pitch`, which `tilt` keeps it in.
+const M7K_PITCH_MIN: i8 = -32;
+const M7K_PITCH_MAX: i8 = 64;
+
+/// A world camera: the point a view is built around, the way it faces
+/// (256 per turn; 0 looks toward -Y), its height and its pitch. Declare
+/// more as `#[lowram] static mut` for more views, and give each view its
+/// camera with `Mode7::set_camera`.
+///
+/// Each view reads the height and the pitch its own way: `M7Plain` takes
+/// the pitch as its horizon shift in scanlines (positive looks up),
+/// `M7PlaneRotation` as an angle (0 level, 64 straight down). `M7Static`
+/// reads neither.
 struct M7Camera {
     x: M7Coord,
     y: M7Coord,
     angle: u8,
+    /// Height above the plane, 0..127.
+    height: u8,
+    /// Pitch, `M7K_PITCH_MIN..M7K_PITCH_MAX`.
+    pitch: i8,
 }
 
 /// The camera every view follows until its `set_camera`.
 #[lowram]
 static mut M7K_CAMERA: M7Camera = M7Camera {
-    x: M7Coord(0x8000), y: M7Coord(0x8000), angle: 0,
+    x: M7Coord(0x8000), y: M7Coord(0x8000), angle: 0, height: 64, pitch: 0,
 };
 
 impl M7Camera {
@@ -245,6 +283,35 @@ impl M7Camera {
     /// Turns by `d` steps; positive turns the view counterclockwise.
     fn turn(*self, d: i8) {
         self.angle = self.angle + d as u8;
+    }
+
+    /// Sets the height above the plane, 0..127 (a view clamps higher).
+    fn set_height(*self, h: u8) {
+        self.height = h;
+    }
+
+    /// The height above the plane.
+    fn height(*self) -> u8 {
+        return self.height;
+    }
+
+    /// Sets the pitch, `M7K_PITCH_MIN..M7K_PITCH_MAX` (a view clamps it to
+    /// its own range).
+    fn set_pitch(*self, p: i8) {
+        self.pitch = p;
+    }
+
+    /// The pitch.
+    fn pitch(*self) -> i8 {
+        return self.pitch;
+    }
+
+    /// Adds `d` to the pitch, kept in `M7K_PITCH_MIN..M7K_PITCH_MAX`.
+    fn tilt(*self, d: i8) {
+        let mut p: i16 = self.pitch as i16 + d as i16;
+        if p < M7K_PITCH_MIN as i16 { p = M7K_PITCH_MIN as i16; }
+        if p > M7K_PITCH_MAX as i16 { p = M7K_PITCH_MAX as i16; }
+        self.pitch = p as i8;
     }
 
     /// Moves the camera by a 10.6 delta, such as `m7k_heading` gives.
@@ -369,25 +436,25 @@ trait Mode7 {
 // ============================================================================
 
 /// A `Mode7` view built a scanline at a time into a transport: a floor
-/// (`m7k_floor!`) or a game's own per-line effect. A build renders rows
+/// (`m7k_plain!`) or a game's own per-line effect. A build renders rows
 /// into a region of lines, `begin()..end()`; the lines above it, down from
-/// the build's `top`, show the transport's top matrix. Presets stack these
-/// by their regions: `m7k_horizon!` puts a band over the lines above the
-/// region and `m7k_split!` builds two into one frame, through these
-/// methods alone.
+/// the build's `top`, show the transport's top matrix. A game stacks
+/// these by their regions through these methods alone: the flyer example
+/// puts a sky band over the lines above a floor's region, and the split
+/// example builds two floors into one frame.
 trait Mode7Scan: Mode7 {
     /// Builds `lines` lines from screen line `top` into the transport's
     /// back buffer, without publishing: the rows, the center and the
-    /// scroll. A preset building several into one frame calls this for
-    /// each, then lays out the segments itself.
+    /// scroll. A game building several into one frame calls this for each,
+    /// then lays out the segments itself.
     fn build(top: u8, lines: u8);
 
     /// Publishes the last full-screen `build` as the transport's next
     /// frame.
     fn publish();
 
-    /// The transport's `commit()`, for a preset's `nmi()`: whether it
-    /// flipped, and the buffer now shown.
+    /// The transport's `commit()`, for an NMI handler that shows add-ons
+    /// with the frame: whether it flipped, and the buffer now shown.
     fn commit() -> bool, u8;
 
     /// The first screen line the last build rendered rows into.
@@ -397,11 +464,134 @@ trait Mode7Scan: Mode7 {
     /// the region is `begin()..end()`, empty when they are equal.
     fn end() -> u8;
 
+    /// Appends the last build's region, lines `begin()..end()`, to the back
+    /// buffer's tables at cursor `p` (after the segments above it), and
+    /// returns the next cursor. A game laying out several views in one
+    /// frame calls it for each, instead of naming the rows itself.
+    fn segment(p: u16) -> u16;
+
     /// The last build's center (M7X, M7Y), in texels.
     fn center() -> u16, u16;
 
     /// The last build's BG1 scroll (M7HOFS, M7VOFS).
     fn scroll() -> u16, u16;
+}
+
+// ============================================================================
+// SCAN VIEW HELPERS
+// ============================================================================
+//
+// The bodies `M7Plain` and `M7PlaneRotation` share, as macros each
+// instance expands in its own functions, so the code stays the instance's,
+// with its state's absolute addresses. A scan view's state has the fields
+// they name: `top`, `sky`, `ground` (the last build's band), `pivot` (the
+// screen line the matrix pivots on), `angle`, `sin`, `cos`, `depth`, `cx`,
+// `cy`, `hofs`, `vofs`, `line_z`, `line_dist` (`i16`, falling from the
+// horizon down), `reach` (the cull distance, texels), `gen` (bumped by a
+// table rebuild), `camera`, and per transport buffer the keys `key_angle`,
+// `key_gen`, `key_top`, `key_rows`, `key_stamp`, `key_sky`, `key_ground`,
+// `key_tstamp` and `key_tgen`. Their locals are prefixed `m7k_`.
+
+/// `to_screen`'s body for scan view state `$state` on transport state
+/// `$hstate`: world point (`$x`, `$y`) to (sx, sy, texel size), or sy
+/// `M7K_HIDDEN`. It returns from the function it is expanded in.
+macro_rules! m7k_scan_to_screen($state:ident, $hstate:ident, $x:expr, $y:expr) {
+    let m7k_dx, m7k_dy = m7k_from_center($x, $y, $state.cx, $state.cy);
+    $state.depth = 0;
+    let m7k_ground: u16 = $state.ground as u16;
+    if m7k_ground == 0 {
+        return 0, M7K_HIDDEN, 0;
+    }
+    // Farther than `reach` on either axis (texels) is off the view: no
+    // multiply.
+    let m7k_reach: u16 = $state.reach;
+    let _m7k_xn, m7k_ax = m7k_abs(m7k_dx);
+    let _m7k_yn, m7k_ay = m7k_abs(m7k_dy);
+    if (m7k_ax >> 6) > m7k_reach || (m7k_ay >> 6) > m7k_reach {
+        return 0, M7K_HIDDEN, 0;
+    }
+    // view space, texels: forward = (-sin, -cos), right = (cos, -sin)
+    let m7k_f, m7k_r = m7k_rotate14($state.sin, $state.cos, m7k_dx, m7k_dy);
+    $state.depth = m7k_f;
+    if m7k_f > $state.line_dist[0] || m7k_f < $state.line_dist[m7k_ground - 1] {
+        return 0, M7K_HIDDEN, 0;
+    }
+    // the line whose distance is nearest below f: line_dist falls
+    let mut m7k_lo: u16 = 0;
+    let mut m7k_hi: u16 = m7k_ground - 1;
+    while m7k_lo < m7k_hi {
+        let m7k_mid: u16 = (m7k_lo + m7k_hi) >> 1;
+        if $state.line_dist[m7k_mid] > m7k_f { m7k_lo = m7k_mid + 1; } else { m7k_hi = m7k_mid; }
+    }
+    let m7k_size: u16 = m7k_recip($state.line_z[m7k_lo] as u8);
+    let m7k_rn, m7k_rm = m7k_abs(m7k_r);
+    let m7k_olo, m7k_ohi = mul16_wide(m7k_rm, m7k_size);
+    let mut m7k_off: i16 = ((m7k_ohi << 8) | (m7k_olo >> 8)) as i16;
+    if m7k_rn { m7k_off = 0 - m7k_off; }
+    let mut m7k_sx: i16 = 128 + m7k_off;
+    if $hstate.sel & 0x01 != 0 { m7k_sx = 255 - m7k_sx; }
+    return m7k_sx, ($state.sky as u16 + m7k_lo) as i16, m7k_size;
+}
+
+/// The heading, rows and view of a scan view's build, once its band (`top`,
+/// `sky`, `ground`) and its `pivot` are set: the back buffer's `$n` rows
+/// from row `$top`, by row builder `$rows`, unless its keys say they are
+/// there; then the center on camera `$cam` and the scroll.
+macro_rules! m7k_scan_build_rows($state:ident, $hdma:ident, $hstate:ident, $rows:ident, $cam:ident, $top:ident, $n:expr) {
+    let m7k_angle: u8 = $cam.angle;
+    $state.angle = m7k_angle;
+    let m7k_s: i16 = m7k_sin(m7k_angle);
+    let m7k_c: i16 = m7k_cos(m7k_angle);
+    $state.sin = m7k_s;
+    $state.cos = m7k_c;
+    let m7k_kb: u16 = $hdma::back_index() as u16;
+    let m7k_nrows: u8 = $n;
+    let m7k_gen: u8 = $state.gen;
+    let m7k_stamp: u8 = $hdma::stamp();
+    if $state.key_gen[m7k_kb] != m7k_gen || $state.key_angle[m7k_kb] != m7k_angle
+        || $state.key_top[m7k_kb] != $top || $state.key_stamp[m7k_kb] != m7k_stamp
+        || $state.key_rows[m7k_kb] < m7k_nrows {
+        let m7k_neg_c, m7k_abs_c = m7k_abs(m7k_c);
+        let m7k_neg_s, m7k_abs_s = m7k_abs(m7k_s);
+        $rows!($hstate, $state, $hdma::back() + (($top as u16) << 1),
+               m7k_nrows as u16, m7k_abs_c, m7k_abs_s, m7k_neg_c, m7k_neg_s);
+        $state.key_gen[m7k_kb] = m7k_gen;
+        $state.key_angle[m7k_kb] = m7k_angle;
+        $state.key_top[m7k_kb] = $top;
+        $state.key_stamp[m7k_kb] = m7k_stamp;
+        $state.key_rows[m7k_kb] = m7k_nrows;
+    }
+    // Center on the camera; the vertical term crosses zero on the pivot.
+    let m7k_cx: u16 = $cam.x.texel();
+    let m7k_cy: u16 = $cam.y.texel();
+    $state.cx = m7k_cx;
+    $state.cy = m7k_cy;
+    $state.hofs = m7k_cx - 128;
+    $state.vofs = m7k_cy - $state.pivot;
+}
+
+/// `publish`'s body for scan view `$name` (state `$state`) on transport
+/// `$hdma`: the top matrix down to the horizon, then the view's own
+/// `segment`, unless the back buffer's tables already hold that layout.
+macro_rules! m7k_scan_publish($name:ident, $state:ident, $hdma:ident) {
+    $hdma::set_center($state.cx, $state.cy, $state.hofs, $state.vofs);
+    let m7k_kb: u16 = $hdma::back_index() as u16;
+    let m7k_sky: u8 = $state.sky;
+    let m7k_ground: u8 = $state.ground;
+    let m7k_stamp: u8 = $hdma::stamp();
+    let m7k_gen: u8 = $state.gen;
+    if $state.key_sky[m7k_kb] == m7k_sky && $state.key_ground[m7k_kb] == m7k_ground
+        && $state.key_tstamp[m7k_kb] == m7k_stamp && $state.key_tgen[m7k_kb] == m7k_gen {
+        $hdma::finish_same(true);
+    } else {
+        let m7k_p: u16 = $hdma::seg_top(0, m7k_sky);
+        let m7k_q: u16 = $name::segment(m7k_p);
+        $hdma::finish(m7k_q, true);
+        $state.key_sky[m7k_kb] = m7k_sky;
+        $state.key_ground[m7k_kb] = m7k_ground;
+        $state.key_tstamp[m7k_kb] = m7k_stamp;
+        $state.key_tgen[m7k_kb] = m7k_gen;
+    }
 }
 
 // ============================================================================
@@ -870,7 +1060,7 @@ macro_rules! m7k_hdma($name:ident, $state:ident, $lines:expr, $ch_ab:expr, $ch_c
             $name::finish(q, false);
         }
 
-        /// Starts the back buffer's tables, for a frame of several bands:
+        /// Starts the back buffer's tables, for a frame of several segments:
         /// the first segment's cursor.
         fn begin() -> u16 {
             return 0;
@@ -883,6 +1073,18 @@ macro_rules! m7k_hdma($name:ident, $state:ident, $lines:expr, $ch_ab:expr, $ch_c
             let ident: u16 = &$state.top as u16;
             m7k_hdma_ind(&$state.abi as far *u8, base + p, lines, ident, 4, false);
             let q: u16 = m7k_hdma_ind(&$state.cdi as far *u8, base + p, lines, ident + 4, 4, false);
+            return q - base;
+        }
+
+        /// A segment of `lines` lines all holding row `row`'s matrix, for a
+        /// view whose lines share one. Returns the next cursor.
+        fn seg_hold(p: u16, row: u8, lines: u8) -> u16 {
+            let base: u16 = ($state.back as u16) << 5;
+            let row: u16 = ($name::back() + ((row as u16) << 1)) << 1;
+            let ab: u16 = (&$state.ab as u16) + row;
+            let cd: u16 = (&$state.cd as u16) + row;
+            m7k_hdma_ind(&$state.abi as far *u8, base + p, lines, ab, 4, false);
+            let q: u16 = m7k_hdma_ind(&$state.cdi as far *u8, base + p, lines, cd, 4, false);
             return q - base;
         }
 
@@ -919,3 +1121,33 @@ macro_rules! m7k_hdma($name:ident, $state:ident, $lines:expr, $ch_ab:expr, $ch_c
 
 // The default transport: all 224 lines, channels 2 and 3.
 m7k_hdma!(M7HDMA, M7K_HDMA, 224, 2, 3);
+
+// ============================================================================
+// THE DEPTH SCALE
+// ============================================================================
+//
+// The per-line views' shared table: `M7Plain` and `M7PlaneRotation` both
+// turn a 1/Z interpolant into a depth scale through it. Placed wherever it
+// fits, not in the includer's bank: the bank the include restores comes
+// back after this file.
+
+/// The last `M7K_ZRECIP` index: the ramp's end, 32 lines past dizworld's
+/// near edge, at height 0.
+const M7K_ZRECIP_LAST: u16 = 2320;
+
+const fn m7k_build_zrecip() -> [u8; 2321] {
+    let mut t: [u8; 2321] = [0; 2321];
+    t[0] = 255;
+    for i in 1..2321 {
+        let v: u16 = 32768 / (i as u16);
+        if v > 255 { t[i] = 255; } else { t[i] = v as u8; }
+    }
+    return t;
+}
+
+#[bank(auto)]
+
+/// min(255, 32768 / i): the depth scale for 1/Z interpolant `zr >> 4`.
+/// `M7Plain`'s ramp runs `M7K_PITCH_DOWN` lines past 2^21 / 64, so the
+/// index stops at `M7K_ZRECIP_LAST`.
+far static M7K_ZRECIP: [u8; 2321] = m7k_build_zrecip();

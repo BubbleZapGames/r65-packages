@@ -15,14 +15,18 @@ trait, so a game's loop and sprite code read the same in any:
 - **`M7Static`** (`static.r65`): one matrix a frame, written in vblank. A
   top-down map that rotates, zooms, squashes and stretches. It touches no
   HDMA register, so HDMAEN stays yours.
-- **`M7Floor`** (`floor.r65`): a Mode Y perspective floor, one matrix a
-  scanline by HDMA, that tilts up and down.
-- **`Horizon`** (`horizon_bg.r65`): not a view itself, but a background
-  for a floor: a sky band in another BG mode above the floor's horizon, a
-  haze under it, and a HUD band under the floor if you want one. It reads
-  the floor's last build; the floor stays your view.
-- **A split screen** (`views.r65`, `m7k_split!`): two floors, each
-  following its own camera, stacked.
+- **`M7Plain`** (`plain.r65`): a Mode Y perspective floor, one matrix a
+  scanline by HDMA, that tilts up and down by sliding its picture.
+- **`M7PlaneRotation`** (`plane_rotation.r65`): the perspective plane at a
+  true pitch angle, from about 8° down to straight down. Its
+  foreshortening changes with the tilt as a real camera's does. It costs
+  more than the floor to turn, except straight down, where every line
+  shares one matrix.
+
+A sky above the floor, a HUD band under it and a split screen of two
+floors are the game's to build on the floor: `examples/flyer/` and
+`examples/split/` each carry their own, with the per-line BG mode and layer
+bands they need.
 
 | `Mode7` method | Does |
 |---|---|
@@ -34,11 +38,11 @@ trait, so a game's loop and sprite code read the same in any:
 | `to_world(sx, sy) -> on, x, y` | The world point under a pixel, and whether it's on the map |
 | `set_repeat`, `set_flip`, `repeat`, `flip` | M7SEL |
 
-Call them on the type: `M7Static::update()`, `Horizon::nmi()`. The HDMA
-views (`M7Floor`, `Horizon`, a split, a transport) also have `stop()`,
-which turns their channels off when a game switches away from them. Only the
-properties differ: `M7Static::set_zoom(zx, zy)`, or
-`M7Floor::set_height(h)` and `M7Floor::set_pitch(p)`.
+Call them on the type: `M7Static::update()`, `M7Plain::nmi()`. The HDMA
+views (`M7Plain`, `M7PlaneRotation`, a transport) also have `stop()`,
+which turns their channels off when a game switches away from them. The
+camera carries the height and the pitch, which each view reads its own
+way; `M7Static` has its own zoom, `M7Static::set_zoom(zx, zy)`.
 
 ## Files
 
@@ -47,12 +51,10 @@ Tables build at compile time.
 
 | File | Gives you | ROM tables | RAM |
 |---|---|---|---|
-| `static.r65` | `M7Static` | sin/cos, reciprocal (1.2 KB) | 36 B |
-| `floor.r65` | `M7Floor`, the perspective floor (a `Mode7Scan`) | + depth tables (2.9 KB) | + 0.9 KB |
-| `horizon_bg.r65` | `Horizon`: a sky, a haze, a HUD; `M7Bands`, channels 4–6 | + fade (33 B) | + 140 B |
-| `views.r65` | `M7Views`, channels 1 and 7, and `m7k_split!` | | + 200 B, + 0.9 KB a floor |
-| `scale.r65` | the reciprocal table | 512 B | none |
-| `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Camera` and the world-coordinate helpers, the sin/cos table, the M7SEL enums, VRAM upload macros; `M7HDMA`, the per-line matrices, for your own effects, HDMA channels 2–3 | sin/cos (640 B) | 5 B a camera; 3.7 KB (16 B a line) once `M7HDMA` is used |
+| `static.r65` | `M7Static` | sin/cos, reciprocal (1.2 KB) | 38 B |
+| `plain.r65` | `M7Plain`, the perspective floor (a `Mode7Scan`) | + depth scale (2.3 KB) and per-height tables (640 B) | + 0.9 KB |
+| `plane_rotation.r65` | `M7PlaneRotation`, the plane at a true pitch (a `Mode7Scan`) | + depth scale (2.3 KB) | + 0.9 KB |
+| `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Camera` and the world-coordinate helpers, the sin/cos and zoom reciprocal tables, the M7SEL enums, VRAM upload macros; `M7HDMA`, the per-line matrices, for your own effects, HDMA channels 2–3 | sin/cos (640 B), reciprocal (512 B) | 7 B a camera; 3.7 KB (16 B a line) once `M7HDMA` is used |
 
 ## Quick start
 
@@ -87,41 +89,45 @@ fn main() -> ! {
 }
 ```
 
-A flyer over a perspective floor, with a Mode 1 sky:
+A flyer over a perspective floor:
 
 ```rust
-include!("mode7kit/horizon_bg.r65")
+include!("mode7kit/plain.r65")
 
 #[interrupt(nmi)]
-fn vblank() {
-    M7Floor::nmi();
-    Horizon::nmi();
-    let hofs, vofs = Horizon::sky_scroll();   // BG2's scroll
-}
+fn vblank() { M7Plain::nmi(); }
 
 // in force blank:
-M7Floor::setup(M7Repeat::Wrap, M7Flip::None);
-Horizon::set_sky(BG::Mode1, 0x12, 0x11);   // sky: Mode 1, BG2 + OBJ; floor: BG1 + OBJ
-Horizon::setup();
+M7Plain::setup(M7Repeat::Wrap, M7Flip::None);
+TM = 0x11;                        // BG1 + OBJ
 
 loop {
     wait_nmi!();
     M7K_CAMERA.turn(2);
-    M7Floor::set_height(height);
-    M7Floor::set_pitch(pitch);
-    M7Floor::build(0, 224);       // the floor's update(), split around the sky's
-    Horizon::update();            // the bands at the floor's horizon
-    M7Floor::publish();
-    let sx, sy, size = M7Floor::to_screen(enemy_x, enemy_y);
+    M7K_CAMERA.set_height(height);
+    M7K_CAMERA.set_pitch(pitch);         // the floor: a horizon shift in scanlines
+    M7Plain::update();
+    let sx, sy, size = M7Plain::to_screen(enemy_x, enemy_y);
 }
 ```
 
-The sky's bands must be ready before the floor publishes the frame they go
-with, so `Horizon::update()` sits between the floor's `build` and
-`publish`. With a HUD band, build the lines above it: `build(0, 224 - hud)`.
+For a sky above the horizon, split the floor's `update()` into
+`M7Plain::build(0, 224)` and `M7Plain::publish()`, and set your sky's
+lines from `M7Plain::begin()` between them, so they are ready with the
+frame they go with. The flyer example does this.
 
-`examples/topdown/`, `examples/flyer/` and `examples/split/` are ROMs for
-each, with tests that drive them. `examples/beachball/` uses Static mode for
+A true pitch is `M7PlaneRotation` in place of `M7Plain`, with the same
+calls; the camera's pitch is then an angle, 6..64 (64 straight down):
+
+```rust
+include!("mode7kit/plane_rotation.r65")
+// ...
+M7K_CAMERA.tilt(1);                      // look a step further down
+M7PlaneRotation::update();
+```
+
+`examples/topdown/`, `examples/flyer/`, `examples/plane/` and
+`examples/split/` are ROMs for each, with tests that drive them. `examples/beachball/` uses Static mode for
 a single object: a spinning, squashing ball over a sprite floor.
 
 ## Units
@@ -131,8 +137,8 @@ a single object: a spinning, squashing ball over a sprite floor.
 | angle | `u8` | 256 steps per turn |
 | matrix entry | `i16` | 8.8 fixed point: `0x0100` is 1.0 |
 | zoom | `u8` per screen axis | 64 is 1.0×, 128 magnifies 2×, 16 shrinks to ¼× |
-| height | `u8` | camera height for the floor, 0..127 |
-| pitch | `i8` | scanlines, −32 (look down) to 64 (look up) |
+| height | `u8` | the camera's height, 0..127 |
+| pitch | `i8` | the camera's, −32..64. `M7Plain`: scanlines, negative looks down. `M7PlaneRotation`: an angle, 6 (8.4°) to 64 (straight down) |
 | world coordinate | `M7Coord` | 10.6 fixed-point texels on the 1024×1024 plane |
 | screen position | `i16` | pixels; off-screen points fall outside 0..255 / 0..223 |
 
@@ -146,7 +152,8 @@ around it, and `m7k_delta(a, b)` is the shortest way between two points.
 
 `M7K_CAMERA` is the camera every view follows until its `set_camera`:
 `M7K_CAMERA.set(x, y)`, `.set_angle(a)`, `.turn(d)`, `.forward(speed)`
-and `.strafe(speed)` (in 1/64 texels; negative goes back or left).
+and `.strafe(speed)` (in 1/64 texels; negative goes back or left), and
+`.set_height(h)`, `.set_pitch(p)` and `.tilt(d)`.
 Switching views keeps the view where it was. For a second view, declare
 another `#[lowram]` `M7Camera` and pass it: `FloorB::set_camera(&CAM_B)`.
 The view keeps the pointer, so moving the camera moves the view.
@@ -168,7 +175,7 @@ For a matrix of your own, skip `update()`: `rotate`, `scale`,
 
 ## The floor, the sky and the HUD
 
-`M7Floor::update()` builds next frame's floor around the camera. The
+`M7Plain::update()` builds next frame's floor around the camera. The
 horizon is at scanline 32..95, unpitched; higher cameras see more ground.
 The pitch tilts the view: the horizon moves by that many lines, and
 everything on the floor with it. It is a y-shear, the look-up/look-down of
@@ -178,24 +185,13 @@ if `update` runs late, the old floor stays. A frame whose heading and
 height haven't changed rebuilds nothing.
 
 `to_screen` on the floor returns `sy == M7K_HIDDEN` for points behind the
-camera, past the horizon or below the floor; `M7Floor::depth()` is the
+camera, past the horizon or below the floor; `M7Plain::depth()` is the
 last point's distance, for sorting. Call the projections after `update` in
 the same frame, so the sprites move with the floor they belong to.
 
 On the floor, `M7Flip::Horizontal` mirrors the view; a vertical flip isn't
 shown, since each scanline's matrix belongs to that scanline. It stays set,
 for a return to Static mode.
-
-`Horizon` adds the bands around the floor, all before `setup`:
-- `set_sky(sky_mode, sky_tm, ground_tm)` puts another BG mode (sneslib's
-  `BG`) above the horizon (`BG::Mode1`, typically, for a scrolling sky on
-  BG2);
-- `set_haze(true)` adds a fading fixed colour on BG1 under it;
-- `set_hud(lines, mode, tm)` adds a band of its own at the bottom, its mode
-  a `BG` too, and the floor stops above it.
-
-`Horizon::sky_scroll()` gives a sky scroll that turns with the view and
-meets the horizon. The floor's properties stay on `M7Floor`.
 
 ## Your own per-line effect
 
@@ -212,47 +208,26 @@ The HDMA layers are macros, and each file declares one default instance.
 For other sizes, other channels or more than one, declare your own:
 
 ```rust
-include!("mode7kit/horizon_bg.r65")
+include!("mode7kit/plain.r65")
 
 m7k_hdma!(Hdma160, HDMA160, 160, 1, 3);          // 160 lines, channels 1 and 3
-m7k_floor!(Floor, FLOOR, Hdma160, HDMA160, m7k_rows_mul);
-m7k_bands!(Bands, BANDS, Hdma160, 3, 4, 5);      // 3 bands, no COLDATA channel
-m7k_horizon!(Hud, HUD, Floor, Bands);            // Floor's sky; then Hud::setup(), Hud::update()...
+m7k_plain!(Floor, FLOOR, Hdma160, HDMA160, m7k_rows_mul);
 ```
 
 | Macro | Makes |
 |---|---|
 | `m7k_hdma!(Name, STATE, lines, ch_ab, ch_cd)` | a transport of `lines` rows (16 bytes of RAM a line) |
-| `m7k_floor!(Name, STATE, Hdma, HDMA_STATE, m7k_rows_mul)` | a floor in that transport, following `M7K_CAMERA` until its `set_camera` |
-| `m7k_bands!(Name, STATE, Hdma, max, ch_mode, ch_tm[, ch_col])` | up to `max` bands; COLDATA (for the haze) only with `ch_col` |
-| `m7k_horizon!(Name, STATE, Floor, Bands)` | a sky and a HUD for that floor (any `Mode7Scan`) |
-| `m7k_views!(Name, STATE, Hdma, max, ch_center, ch_scroll)` | a Mode 7 view per band |
-| `m7k_split!(Name, STATE, Hdma, Bands, Views, FloorA, FloorB)` | two floors stacked |
+| `m7k_plain!(Name, STATE, Hdma, HDMA_STATE, m7k_rows_mul)` | a floor in that transport, following `M7K_CAMERA` until its `set_camera` |
 
 Instances you don't use cost nothing.
 
 ## Split screen
 
-Two cameras, two floors over one transport, and the split preset:
-
-```rust
-include!("mode7kit/views.r65")
-
-#[lowram]
-static mut CAM_B: M7Camera = M7Camera { x: M7Coord(0x8000), y: M7Coord(0x8000), angle: 128 };
-
-m7k_floor!(FloorB, FLOOR_B, M7HDMA, M7K_HDMA, m7k_rows_mul);
-m7k_bands!(Bands4, BANDS4, M7HDMA, 4, 4, 5);
-m7k_split!(Split, SPLIT, M7HDMA, Bands4, M7Views, M7Floor, FloorB);
-
-FloorB::set_camera(&CAM_B);     // the top half keeps M7K_CAMERA
-```
-
-Each half has a sky band and a floor band, and each half's view (the Mode
-7 center and the BG1 scroll) is set by HDMA. The sky is BG1 in the sky's
-BG mode, so each half's sky scrolls with its own camera: point BG1SC and
-BG12NBA at the sky. A half shows the top of a full-screen floor, cropped,
-so look down a little (`set_pitch(-24)`) to see more of it.
+Two floors over one transport, each with its own camera
+(`FloorB::set_camera(&CAM_B)`), each built into its half with
+`build(top, lines)` and laid out as one frame with the transport's
+segments. `examples/split/` builds one, with a sky band in each half; see
+its README.
 
 ## Switching modes
 
@@ -260,8 +235,7 @@ A game with several views switches in vblank, straight after
 `wait_nmi!()`:
 
 ```rust
-Horizon::stop();                 // the sky's bands
-M7Floor::stop();                 // only an HDMA view has one
+M7Plain::stop();                 // only an HDMA view has one
 M7Static::setup(M7Static::repeat(), M7Static::flip());
 // and the NMI handler now calls M7Static::nmi()
 ```
@@ -275,9 +249,8 @@ other's functions does no harm, but answers for that other view.
 | Channel | Used by default by |
 |---|---|
 | 0 | free for the game (the upload macros use it, in force blank) |
-| 1, 7 | `M7Views`: M7X/M7Y, BG1 scroll (split screen only) |
 | 2, 3 | `M7HDMA`: M7A/M7B, M7C/M7D |
-| 4, 5, 6 | `M7Bands`: BGMODE, TM, COLDATA (6 with the haze only) |
+| 1, 4–7 | free for the game (the flyer's sky bands use 4–6, the split's views 1 and 7) |
 
 Your own instances can use any channels. In Static mode HDMAEN is yours.
 With the floor, the transport writes it every vblank: add your own
@@ -289,7 +262,8 @@ mode7kit's own `nmi()` functions don't.
 
 ## Cost
 
-Measured by `tests/bench/`, in scanlines of a 262-line frame:
+Measured by `tests/bench/`, in scanlines of a 262-line frame ("+ sky" is
+the bench's own copy of the flyer's sky bands):
 
 | Work | Scanlines |
 |---|---|
@@ -299,6 +273,8 @@ Measured by `tests/bench/`, in scanlines of a 262-line frame:
 | a height change (the line tables) | + 159 |
 | `to_screen` on the floor: visible / behind / far | 13 / 8 / 4 |
 | `M7Static::update` | 10 |
+| `M7PlaneRotation` turning at 22.5° / 45° / straight down | 182 / 275 / 10 |
+| `M7PlaneRotation` pitch change (tables and rows) | 395 |
 
 The flyer example, with five objects projected, runs at 60 fps while
 turning; a frame that changes the height drops to 30.

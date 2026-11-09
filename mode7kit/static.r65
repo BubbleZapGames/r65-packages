@@ -1,9 +1,8 @@
 //! mode7kit Static mode: one matrix a frame, committed in vblank.
 //!
-//! Includes `core.r65` and `scale.r65`; adds no table. `M7Static`
-//! implements `Mode7` with its own copy of the matrix, its inverse, the
-//! center, the scroll, M7SEL and its camera, in the `M7K_STATIC`
-//! singleton. It touches no HDMA register: a Static game owns HDMAEN and
+//! Includes `core.r65`; adds no table. `M7Static` implements `Mode7`
+//! with its own copy of the matrix, its inverse, the center, the scroll,
+//! M7SEL and its camera, in the `M7K_STATIC` singleton. It touches no HDMA register: a Static game owns HDMAEN and
 //! may run its own HDMA on any channel.
 //!
 //! `update()` turns the view to its camera's heading, scales it by the
@@ -27,7 +26,6 @@
 //! ```
 
 include!("mode7kit/core.r65")
-include!("mode7kit/scale.r65")
 
 /// Static mode's state: the registers as the next vblank writes them,
 /// plus what the projections and `update()` need. Matrix entries are 8.8

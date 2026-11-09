@@ -1,11 +1,11 @@
 //! mode7kit flyer example: dizworld's Mode Y view, a perspective floor
 //! under a Mode 1 sky.
 //!
-//! `horizon_bg.r65`: the `M7Floor` floor under `Horizon`, its sky. D-pad
-//! left/right turn, up/down fly, L/R lower and raise the camera, X/B tilt
-//! the view up and down, Start mirrors the view.
+//! The `M7Plain` floor under `Horizon`, its sky (`src/horizon.r65`, this
+//! example's own). D-pad left/right turn, up/down fly, L/R lower and raise
+//! the camera, X/B tilt the view up and down, Start mirrors the view.
 //!
-//! Five world points are projected each frame with `M7Floor::to_screen`
+//! Five world points are projected each frame with `M7Plain::to_screen`
 //! into `OBJECT_SCREEN`, where the tests read them.
 //!
 //! Graphics: dizworld by Brad Smith (CC BY 4.0), with art by Sharm and
@@ -17,7 +17,7 @@
 
 include!("stdlib/65816.r65")
 include!("stdlib/sneslib.r65")
-include!("mode7kit/horizon_bg.r65")
+include!("horizon.r65")
 
 #[bank(0)]
 
@@ -40,8 +40,7 @@ static OBJECT_X: [u16; 5] = [512, 560, 470, 600, 8];
 static OBJECT_Y: [u16; 5] = [400, 450, 470, 300, 512];
 
 /// The pad, and a frame counter. The view itself lives in mode7kit: the
-/// heading in `M7K_CAMERA`, the height and pitch in `M7K_FLOOR`, where the
-/// tests write them.
+/// heading, height and pitch in `M7K_CAMERA`, where the tests write them.
 struct Game {
     frames: u16,
     pad: u16,
@@ -73,7 +72,7 @@ fn project_objects() {
     while i < OBJECTS {
         let x: M7Coord = M7Coord::from_texel(OBJECT_X[i]);
         let y: M7Coord = M7Coord::from_texel(OBJECT_Y[i]);
-        let sx, sy, _size = M7Floor::to_screen(x, y);
+        let sx, sy, _size = M7Plain::to_screen(x, y);
         OBJECT_SCREEN[i << 1] = sx;
         OBJECT_SCREEN[(i << 1) + 1] = sy;
         i++;
@@ -83,21 +82,21 @@ fn project_objects() {
 fn update() {
     if held(JOY_LEFT) { M7K_CAMERA.turn(2); }
     if held(JOY_RIGHT) { M7K_CAMERA.turn(-2); }
-    let h: u8 = M7Floor::height();
-    if held(JOY_L) && h > 1 { M7Floor::set_height(h - 2); }
-    if held(JOY_R) && h < 126 { M7Floor::set_height(h + 2); }
-    let p: i8 = M7Floor::pitch();
-    if held(JOY_X) && p < M7K_PITCH_UP { M7Floor::set_pitch(p + 2); }
-    if held(JOY_B) && p > 0 - M7K_PITCH_DOWN { M7Floor::set_pitch(p - 2); }
+    let h: u8 = M7K_CAMERA.height();
+    if held(JOY_L) && h > 1 { M7K_CAMERA.set_height(h - 2); }
+    if held(JOY_R) && h < 126 { M7K_CAMERA.set_height(h + 2); }
+    let p: i8 = M7K_CAMERA.pitch();
+    if held(JOY_X) && p < M7K_PITCH_UP { M7K_CAMERA.set_pitch(p + 2); }
+    if held(JOY_B) && p > 0 - M7K_PITCH_DOWN { M7K_CAMERA.set_pitch(p - 2); }
     if pressed(JOY_START) {
-        M7Floor::set_flip(M7Floor::flip().toggle_h());
+        M7Plain::set_flip(M7Plain::flip().toggle_h());
     }
     // Up/Down along the heading, two texels a frame
     if held(JOY_UP) { M7K_CAMERA.forward(128); }
     if held(JOY_DOWN) { M7K_CAMERA.forward(-128); }
-    M7Floor::build(0, 224);
+    M7Plain::build(0, 224);
     Horizon::update();
-    M7Floor::publish();
+    M7Plain::publish();
     project_objects();
 }
 
@@ -108,7 +107,7 @@ fn update() {
 #[interrupt(nmi)]
 fn nmi_handler() {
     clear_nmi!();
-    M7Floor::nmi();
+    M7Plain::nmi();
     Horizon::nmi();
     let hofs, vofs = Horizon::sky_scroll();
     BG2HOFS = hofs as u8;
@@ -142,7 +141,7 @@ fn main() -> ! {
 
     Horizon::set_sky(BG::Mode1, 0x02, 0x01);              // Mode 1 sky: BG2; floor: BG1
     Horizon::set_haze(true);
-    M7Floor::setup(M7Repeat::Wrap, M7Flip::None);
+    M7Plain::setup(M7Repeat::Wrap, M7Flip::None);
     Horizon::setup();
     M7K_CAMERA.set(M7Coord::from_texel(512), M7Coord::from_texel(512));
     NMITIMEN = Interrupt::Nmi as u8 | Interrupt::AutoJoy as u8;

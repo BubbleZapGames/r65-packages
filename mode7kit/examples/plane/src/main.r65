@@ -1,0 +1,145 @@
+//! mode7kit plane example: `M7PlaneRotation`, the perspective plane at a
+//! true pitch angle, under a Mode 1 sky.
+//!
+//! The view is mode7kit's `M7PlaneRotation`; the sky is this example's own
+//! `Horizon` (`src/horizon.r65`), the flyer's, over the plane instead of
+//! the floor. D-pad left/right turn, up/down fly, L/R lower and raise the
+//! camera, X/B tilt the view up and down (about 8° down to straight down),
+//! Start mirrors the view.
+//!
+//! Five world points are projected each frame with
+//! `M7PlaneRotation::to_screen` into `OBJECT_SCREEN`, where the tests read
+//! them.
+//!
+//! Graphics: dizworld by Brad Smith (CC BY 4.0), with art by Sharm and
+//! KnoblePersona from OpenGameArt; see ../flyer/README.md.
+
+#[snesrom(name="MODE7KIT PLANE", hirom, fastrom)]
+
+#[stack(0x0100, 0x01FF)]
+
+include!("stdlib/65816.r65")
+include!("stdlib/sneslib.r65")
+include!("horizon.r65")
+
+#[bank(0)]
+
+const VRAM_SKY_CHR: u16 = 0x6000;
+const VRAM_SKY_MAP: u16 = 0x6C00;
+
+const OBJECTS: u16 = 5;
+
+/// The world objects, in texels.
+static OBJECT_X: [u16; 5] = [512, 560, 470, 600, 512];
+static OBJECT_Y: [u16; 5] = [400, 450, 470, 300, 540];
+
+/// The pad, and a frame counter. The view itself lives in mode7kit: the
+/// heading, height and pitch in `M7K_CAMERA`, where the tests write them.
+struct Game {
+    frames: u16,
+    pad: u16,
+    pad_prev: u16,
+}
+
+#[lowram]
+static mut GAME: Game = Game { frames: 0, pad: 0, pad_prev: 0 };
+
+/// The last `to_screen` of each object: sx, sy.
+#[lowram]
+static mut OBJECT_SCREEN: [i16; 10];
+
+fn pressed(button: u16) -> bool {
+    return GAME.pad & button != 0 && GAME.pad_prev & button == 0;
+}
+
+fn held(button: u16) -> bool {
+    return GAME.pad & button != 0;
+}
+
+/// Projects each object onto the plane the frame just built.
+fn project_objects() {
+    let mut i: u16 = 0;
+    while i < OBJECTS {
+        let x: M7Coord = M7Coord::from_texel(OBJECT_X[i]);
+        let y: M7Coord = M7Coord::from_texel(OBJECT_Y[i]);
+        let sx, sy, _size = M7PlaneRotation::to_screen(x, y);
+        OBJECT_SCREEN[i << 1] = sx;
+        OBJECT_SCREEN[(i << 1) + 1] = sy;
+        i++;
+    }
+}
+
+fn update() {
+    if held(JOY_LEFT) { M7K_CAMERA.turn(2); }
+    if held(JOY_RIGHT) { M7K_CAMERA.turn(-2); }
+    let h: u8 = M7K_CAMERA.height();
+    if held(JOY_L) && h > 1 { M7K_CAMERA.set_height(h - 2); }
+    if held(JOY_R) && h < 126 { M7K_CAMERA.set_height(h + 2); }
+    let p: i8 = M7K_CAMERA.pitch();
+    if held(JOY_X) && p > M7K_PLANE_PITCH_MIN { M7K_CAMERA.tilt(-1); }
+    if held(JOY_B) && p < M7K_PLANE_PITCH_MAX { M7K_CAMERA.tilt(1); }
+    if pressed(JOY_START) {
+        M7PlaneRotation::set_flip(M7PlaneRotation::flip().toggle_h());
+    }
+    if held(JOY_UP) { M7K_CAMERA.forward(128); }
+    if held(JOY_DOWN) { M7K_CAMERA.forward(-128); }
+    // the plane's update(), split around the sky's
+    M7PlaneRotation::build(0, 224);
+    Horizon::update();
+    M7PlaneRotation::publish();
+    project_objects();
+}
+
+#[interrupt(nmi)]
+fn nmi_handler() {
+    clear_nmi!();
+    M7PlaneRotation::nmi();
+    Horizon::nmi();
+    let hofs, vofs = Horizon::sky_scroll();
+    BG2HOFS = hofs as u8;
+    BG2HOFS = (hofs >> 8) as u8;
+    BG2VOFS = vofs as u8;
+    BG2VOFS = (vofs >> 8) as u8;
+    INIDISP = 0x0F;
+    GAME.frames++;
+}
+
+#[entry]
+fn main() -> ! {
+    snes_init();
+    INIDISP = 0x80;
+    NMITIMEN = 0;
+
+    mode7_upload_interleaved!(BG_MD7_DATA);
+    dma_copy_vram_const!(0, SKY_CHR_DATA, VRAM_SKY_CHR, 5888);
+    dma_copy_vram_const!(0, SKY_NMT_DATA, VRAM_SKY_MAP, 1920);
+    dma_copy_cgram_const!(0, BG_PAL_DATA, 0, 29);
+    CGADD = 0;                       // backdrop: dizworld's sky blue
+    CGDATA = 0xF1;
+    CGDATA = 0x76;
+
+    set_bg12_chr!(0, 6);             // BG2 chr at word $6000
+    set_bg2_map!(0x1B, 0);           // BG2 map at word $6C00
+
+    Horizon::set_sky(BG::Mode1, 0x02, 0x01);              // Mode 1 sky: BG2; plane: BG1
+    Horizon::set_haze(true);
+    M7PlaneRotation::setup(M7Repeat::Wrap, M7Flip::None);
+    Horizon::setup();
+    M7K_CAMERA.set(M7Coord::from_texel(512), M7Coord::from_texel(512));
+    M7K_CAMERA.set_pitch(16);                            // 22.5° down
+    NMITIMEN = Interrupt::Nmi as u8 | Interrupt::AutoJoy as u8;
+
+    loop {
+        wait_nmi!();
+        wait_autojoy!();
+        GAME.pad_prev = GAME.pad;
+        GAME.pad = (JOY1H as u16) << 8 | JOY1L as u16;
+        update();
+    }
+}
+
+#[bank(1)]
+static BG_MD7_DATA = include_bytes!("../../flyer/assets/bg.md7");
+static SKY_CHR_DATA = include_bytes!("../../flyer/assets/sky.chr");
+static SKY_NMT_DATA = include_bytes!("../../flyer/assets/sky.nmt");
+static BG_PAL_DATA = include_bytes!("../../flyer/assets/bg.pal");

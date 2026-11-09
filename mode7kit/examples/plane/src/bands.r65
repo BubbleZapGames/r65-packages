@@ -1,0 +1,296 @@
+//! Bands: the screen split into runs of lines, each with its own BG mode
+//! and main-screen layers, and an optional haze. This ROM's own code, on
+//! mode7kit's transport; mode7kit itself has no bands.
+//!
+//! Includes mode7kit's `core.r65`. Adds `M7K_FADE` (33 bytes).
+//! `m7k_bands!` writes a bands type: per-line BGMODE and TM (and COLDATA
+//! for the haze) by direct-mode HDMA, double-buffered with a transport and
+//! shown on its `commit()`.
+//!
+//! ```
+//! m7k_bands!(Two, TWO, M7HDMA, 2, 4, 5);       // 2 bands, no COLDATA
+//!
+//! Two::set_count(2);
+//! Two::set_band(0, 64, BG::Mode1, 0x02);    // 64 lines of Mode 1, BG2
+//! Two::set_band(1, 0, BG::Mode7, 0x01);     // the rest: Mode 7, BG1
+//! Two::setup();                          // after the transport's setup
+//! // each frame, before the transport's finish:  Two::fill_back();
+//! // in the NMI handler:  let flipped, k = M7HDMA::commit();
+//! //                      if flipped { Two::show(k); }
+//! ```
+
+include!("mode7kit/core.r65")
+
+const fn m7k_build_fade() -> [u8; 33] {
+    let mut t: [u8; 33] = [0; 33];
+    t[0] = 0xE0;
+    for i in 0..16 {
+        t[1 + i] = 0xE0 | ((i as u8) >> 1);
+    }
+    for i in 0..16 {
+        t[17 + i] = 0xE0 | (0x1C - (((i as u16) * 0x1C / 16) as u8));
+    }
+    return t;
+}
+
+/// COLDATA values (all channels): black, 16 steps up from black, then 16
+/// steps from bright down to black. The haze is the last 16.
+static M7K_FADE: [u8; 33] = m7k_build_fade();
+
+const M7K_HAZE_LINES: u8 = 16;
+
+/// No band has the haze.
+const M7K_NO_HAZE: u8 = 0xFF;
+
+/// Once entries holding `$v` for `$n` lines into table `$t` at cursor
+/// `$p` (a `u16` variable, advanced), split into blocks of at most 127:
+/// `m7k_hdma_hold` written in place, for a table in the bands' own state.
+macro_rules! m7k_band_hold($t:expr, $p:ident, $n:expr, $v:expr) {
+    {
+        let mut m7k_left: u8 = $n;
+        let m7k_v: u8 = $v;
+        if m7k_left > 127 {
+            $t[$p] = 127;
+            $t[$p + 1] = m7k_v;
+            $p = $p + 2;
+            m7k_left = m7k_left - 127;
+        }
+        if m7k_left > 0 {
+            $t[$p] = m7k_left;
+            $t[$p + 1] = m7k_v;
+            $p = $p + 2;
+        }
+    }
+}
+
+/// Indirect once entries holding the one byte at `$addr` for `$n` lines,
+/// or with `$cont` one continuous entry reading a byte a line from it (at
+/// most 127 lines), into table `$t` at cursor `$p` (advanced).
+macro_rules! m7k_band_ind($t:expr, $p:ident, $n:expr, $addr:expr, $cont:expr) {
+    {
+        let mut m7k_left: u8 = $n;
+        let m7k_a: u16 = $addr;
+        if m7k_left > 127 {
+            $t[$p] = 127;
+            $t[$p + 1] = m7k_a as u8;
+            $t[$p + 2] = (m7k_a >> 8) as u8;
+            $p = $p + 3;
+            m7k_left = m7k_left - 127;
+        }
+        if m7k_left > 0 {
+            let mut m7k_h: u8 = m7k_left;
+            if $cont { m7k_h = m7k_h | 0x80; }
+            $t[$p] = m7k_h;
+            $t[$p + 1] = m7k_a as u8;
+            $t[$p + 2] = (m7k_a >> 8) as u8;
+            $p = $p + 3;
+        }
+    }
+}
+
+/// `$name`, up to `$max` bands with transport `$hdma`, BGMODE on
+/// `$ch_mode`, TM on `$ch_tm`, and COLDATA on `$ch_col` for the haze. With
+/// no `$ch_col`, there is no haze and no COLDATA channel.
+macro_rules! m7k_bands {
+    ($name:ident, $state:ident, $hdma:ident, $max:expr, $ch_mode:expr, $ch_tm:expr, $ch_col:expr) => {
+        m7k_bands_impl!($name, $state, $hdma, $max, $ch_mode, $ch_tm, $ch_col, true);
+    };
+    ($name:ident, $state:ident, $hdma:ident, $max:expr, $ch_mode:expr, $ch_tm:expr) => {
+        m7k_bands_impl!($name, $state, $hdma, $max, $ch_mode, $ch_tm, $ch_tm, false);
+    };
+}
+
+/// The bands type; `$col` says whether `$ch_col` is a COLDATA channel (a
+/// constant, so the COLDATA code of a type without one is never taken).
+macro_rules! m7k_bands_impl($name:ident, $state:ident, $hdma:ident, $max:expr, $ch_mode:expr, $ch_tm:expr, $ch_col:expr, $col:expr) {
+    /// A bands type's state. Buffer k of a table starts at k times its
+    /// stride: a band takes at most two entries (2 bytes in BGMODE's and
+    /// TM's direct tables, 3 in COLDATA's indirect one), the haze one entry
+    /// more, and a table ends with a 0.
+    struct $name {
+        count: u8,
+        lines: [u8; $max],
+        mode: [u8; $max],
+        tm: [u8; $max],
+        /// The band whose top has the haze, or `M7K_NO_HAZE`.
+        haze: u8,
+        bgm: [u8; 2 * ($max * 4 + 1)],
+        tmt: [u8; 2 * ($max * 4 + 1)],
+        col: [u8; 2 * ($max * 6 + 4)],
+        /// COLDATA's data, which its indirect entries point at: black, then
+        /// the 16-line haze ramp (`M7K_FADE[17..33]`).
+        fade: [u8; 17],
+        /// Bumped by every layout change; each buffer's tables record the
+        /// version they were written from, so `fill_back` skips a match.
+        version: u8,
+        key: [u8; 2],
+    }
+
+    #[lowram]
+    static mut $state: $name = $name {
+        count: 1,
+        lines: [0; $max], mode: [0x07; $max], tm: [0x01; $max],
+        haze: M7K_NO_HAZE,
+        bgm: [0; 2 * ($max * 4 + 1)], tmt: [0; 2 * ($max * 4 + 1)],
+        col: [0; 2 * ($max * 6 + 4)],
+        fade: [0; 17],
+        version: 0, key: [0xFF, 0xFF],
+    };
+
+    impl $name {
+        /// The most bands.
+        const MAX: u8 = $max;
+        /// A table's stride per buffer.
+        const STRIDE: u16 = $max * 4 + 1;
+        const COL_STRIDE: u16 = $max * 6 + 4;
+
+        /// The channels on the bands' buffer 0, both buffers filled from
+        /// the layout, the haze's colour math, and the channels in the
+        /// transport's HDMAEN shadow. After the transport's setup.
+        fn setup() {
+            M7K_DMA[$ch_mode].dmap = 0x00;         // direct, one register
+            M7K_DMA[$ch_mode].bbad = 0x05;         // BGMODE
+            M7K_DMA[$ch_mode].a1t = &$state.bgm as u16;
+            M7K_DMA[$ch_mode].a1b = 0x00;          // low RAM
+            M7K_DMA[$ch_tm].dmap = 0x00;
+            M7K_DMA[$ch_tm].bbad = 0x2C;           // TM
+            M7K_DMA[$ch_tm].a1t = &$state.tmt as u16;
+            M7K_DMA[$ch_tm].a1b = 0x00;
+            $name::fill(0);
+            $name::fill(1);
+            let mut mask: u8 = (1 << $ch_mode) | (1 << $ch_tm);
+            if $col && $state.haze != M7K_NO_HAZE {
+                $state.fade[0] = M7K_FADE[0];
+                let mut j: u16 = 0;
+                while j < 16 {
+                    $state.fade[1 + j] = M7K_FADE[17 + j];
+                    j++;
+                }
+                M7K_DMA[$ch_col].dmap = 0x40;      // indirect, one register
+                M7K_DMA[$ch_col].bbad = 0x32;      // COLDATA
+                M7K_DMA[$ch_col].a1t = &$state.col as u16;
+                M7K_DMA[$ch_col].a1b = 0x00;
+                M7K_DMA[$ch_col].dasb = 0x00;      // the data: low RAM
+                CGWSEL = 0x00;                     // colour math everywhere, fixed colour addend
+                CGADSUB = 0x01;                    // add, on BG1
+                mask = mask | (1 << $ch_col);
+            }
+            $hdma::enable(mask);
+        }
+
+        /// Takes the bands' channels out of the transport's shadow. BGMODE,
+        /// TM and COLDATA keep the last values their tables wrote.
+        fn stop() {
+            let mut mask: u8 = (1 << $ch_mode) | (1 << $ch_tm);
+            if $col { mask = mask | (1 << $ch_col); }
+            $hdma::disable(mask);
+        }
+
+        /// How many bands, 1..MAX.
+        fn set_count(n: u8) {
+            if $state.count != n {
+                $state.count = n;
+                $state.version = $state.version + 1;
+            }
+        }
+
+        fn count() -> u8 {
+            return $state.count;
+        }
+
+        /// Band `i`: `lines` lines (the last band takes the rest of the
+        /// screen, whatever its `lines`), BGMODE `mode`, TM `tm`.
+        fn set_band(i: u8, lines: u8, mode: BG, tm: u8) {
+            $state.lines[i as u16] = lines;
+            $state.mode[i as u16] = mode as u8;
+            $state.tm[i as u16] = tm;
+            $state.version = $state.version + 1;
+        }
+
+        /// The transport's buffer being built, which `fill_back` fills.
+        fn back_index() -> u8 {
+            return $hdma::back_index();
+        }
+
+        /// The transport's buffer on screen, after its `commit()`.
+        fn front_index() -> u8 {
+            return $hdma::back_index() ^ 1;
+        }
+
+        /// Band `i`'s height, for a split that moves each frame.
+        fn set_lines(i: u8, lines: u8) {
+            if $state.lines[i as u16] != lines {
+                $state.lines[i as u16] = lines;
+                $state.version = $state.version + 1;
+            }
+        }
+
+        /// The haze at the top of band `i` (`M7K_NO_HAZE`: none). Before
+        /// `setup`; needs a COLDATA channel.
+        fn set_haze(i: u8) {
+            $state.haze = i;
+            $state.version = $state.version + 1;
+        }
+
+        /// Writes the back buffer's tables from the layout. Before the
+        /// transport's finish.
+        /// Tables the back buffer already holds for this layout are kept.
+        fn fill_back() {
+            let k: u8 = $hdma::back_index();
+            if $state.key[k as u16] != $state.version {
+                $name::fill(k);
+            }
+        }
+
+        /// Writes buffer `k`'s tables from the layout.
+        fn fill(k: u8) {
+            let mut p: u16 = 0;
+            let mut c: u16 = 0;
+            if k != 0 {
+                p = $name::STRIDE;
+                c = $name::COL_STRIDE;
+            }
+            let mut q: u16 = p;
+            let last: u8 = $state.count - 1;
+            let mut used: u8 = 0;
+            let mut i: u16 = 0;
+            while i <= last as u16 {
+                let mut n: u8 = $state.lines[i];
+                if i == last as u16 { n = 224 - used; }
+                m7k_band_hold!($state.bgm, p, n, $state.mode[i]);
+                m7k_band_hold!($state.tmt, q, n, $state.tm[i]);
+                if $col {
+                    let black: u16 = &$state.fade as u16;
+                    let mut flat: u8 = n;
+                    if i == $state.haze as u16 {
+                        let mut ramp: u8 = M7K_HAZE_LINES;
+                        if ramp > n { ramp = n; }
+                        m7k_band_ind!($state.col, c, ramp, black + 1, true);
+                        flat = n - ramp;
+                    }
+                    m7k_band_ind!($state.col, c, flat, black, false);
+                }
+                used = used + n;
+                i++;
+            }
+            $state.bgm[p] = 0;
+            $state.tmt[q] = 0;
+            if $col { $state.col[c] = 0; }
+            $state.key[k as u16] = $state.version;
+        }
+
+        /// Points the channels at buffer `k`, from a preset's `nmi()` when
+        /// the transport's `commit()` flipped.
+        fn show(k: u8) {
+            let mut off: u16 = 0;
+            let mut coff: u16 = 0;
+            if k != 0 {
+                off = $name::STRIDE;
+                coff = $name::COL_STRIDE;
+            }
+            M7K_DMA[$ch_mode].a1t = (&$state.bgm as u16) + off;
+            M7K_DMA[$ch_tm].a1t = (&$state.tmt as u16) + off;
+            if $col { M7K_DMA[$ch_col].a1t = (&$state.col as u16) + coff; }
+        }
+    }
+}

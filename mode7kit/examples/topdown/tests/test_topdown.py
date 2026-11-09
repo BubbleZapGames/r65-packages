@@ -70,7 +70,7 @@ def angle(s):
 
 def camera(s):
     """M7K_CAMERA's x, y (10.6, unsigned)."""
-    return words(s.raw("M7K_CAMERA").bytes(), signed=False)
+    return words(s.raw("M7K_CAMERA").bytes()[:4], signed=False)
 
 
 @pytest.fixture
@@ -88,11 +88,11 @@ def test_lookup_tables(top):
 
 
 def test_only_the_included_tables(top):
-    """Features not included cost nothing: no floor or horizon tables."""
+    """Features not used cost nothing: no depth or floor tables, no
+    transport (a constant such as `M7K_ZRECIP_LAST` is only an equate)."""
     names = set(top.rom.symbols.names())
-    for name in ("M7K_ZRECIP", "M7K_ROW_SKY", "M7K_FADE", "M7K_HDMA", "M7K_FLOOR",
-                 "M7K_BANDS", "M7K_HORIZON"):
-        assert not any(name in n for n in names), name
+    for name in ("__M7K_ZRECIP_data", "__M7K_ROW_SKY_data", "M7K_HDMA", "M7K_PLAIN"):
+        assert name not in names, name
 
 
 # -- the flat view ----------------------------------------------------------------
