@@ -1,15 +1,15 @@
 # mode7kit flyer example
 
 dizworld's Mode Y view: a perspective floor under a Mode 1 sky, with
-`horizon.r65`'s default instances: `Horizon`, the floor `M7Floor` with a
-sky band (`M7Bands`), over the transport `M7HDMA`.
+`horizon_bg.r65`'s default instances: the floor `M7Floor` over the
+transport `M7HDMA`, and `Horizon`, its sky band (`M7Bands`).
 
 - **D-pad** left/right turns, up/down flies.
 - **L/R** lower and raise the camera.
 - **X/B** tilt the view up and down.
 - **Start** mirrors the view.
 
-Five world points are projected each frame with `Horizon::to_screen`
+Five world points are projected each frame with `M7Floor::to_screen`
 into `OBJECT_SCREEN`, where the tests check them. The ROM draws no
 sprites.
 

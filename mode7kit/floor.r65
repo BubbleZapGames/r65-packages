@@ -1,14 +1,16 @@
 //! mode7kit floor: a Mode Y perspective floor, one matrix a scanline.
 //!
-//! Includes `hdma.r65`, `rotate.r65`, `scale.r65` and `world.r65`. Adds
+//! Includes `core.r65` and `scale.r65`. Adds
 //! `M7K_ZRECIP` (2321 bytes) and the per-height tables `M7K_ROW_*` (640
 //! bytes). The floor's math is dizworld's (Brad Smith), with its divisions
 //! moved to compile time.
 //!
-//! `m7k_floor!` writes a floor type implementing `Mode7`: it follows a
-//! camera, builds its rows into a transport (`m7k_hdma!`), and projects.
-//! The default instance is `M7Floor` (state `M7K_FLOOR`): `M7K_CAMERA`
-//! over `M7HDMA`, the whole screen.
+//! `m7k_floor!` writes a floor type implementing `Mode7Scan` (`core.r65`),
+//! and so `Mode7`: it follows a camera, builds its rows into a transport
+//! (`m7k_hdma!`), and projects.
+//! The default instance is `M7Floor` (state `M7K_FLOOR`) over `M7HDMA`,
+//! the whole screen. Every instance follows `M7K_CAMERA` until its
+//! `set_camera`.
 //!
 //! ```
 //! include!("mode7kit/floor.r65")
@@ -28,10 +30,8 @@
 //! The row builder drives the hardware multiplier directly: an NMI
 //! handler running mid-frame must not use it (`mul8`, `div16`...).
 
-include!("mode7kit/hdma.r65")
-include!("mode7kit/rotate.r65")
+include!("mode7kit/core.r65")
 include!("mode7kit/scale.r65")
-include!("mode7kit/world.r65")
 
 // ============================================================================
 // COMPILE-TIME TABLES
@@ -126,7 +126,7 @@ static M7K_ROW_STEP: [u16; 128] = m7k_build_row_step();
 // z = line_z[l].
 
 /// The row builder on the hardware multiplier: two 8×8 products a row.
-/// The first is one `M7K_WRMPY` store of z and the cos byte; WRMPYA keeps
+/// The first is one `WRMPY` store of z and the cos byte; WRMPYA keeps
 /// z, so the second is a store of the sin byte alone. One loop per sign
 /// quadrant, so a row applies no sign masks.
 macro_rules! m7k_rows_mul($hstate:ident, $fstate:ident, $k:expr, $n:expr, $c:expr, $s:expr, $neg_c:expr, $neg_s:expr) {
@@ -159,7 +159,7 @@ macro_rules! m7k_rows_mul_q($hstate:ident, $fstate:ident, $k:ident, $n:ident, $c
     let mut m7k_l: u16 = 0;
     while m7k_k < m7k_end {
         let z: u16 = $fstate.line_z[m7k_l];
-        M7K_WRMPY = z | $ch;
+        WRMPY = z | $ch;
         NOP(4);
         let ma: i16 = (RDMPY >> 5) as i16;
         M7K_WRMPYB = $sh;
@@ -178,11 +178,11 @@ macro_rules! m7k_rows_mul_q($hstate:ident, $fstate:ident, $k:ident, $n:ident, $c
 // THE FLOOR
 // ============================================================================
 
-/// `$name`, a floor following camera `$camera` (an `M7Camera` static),
-/// building its rows into transport `$hdma` (state `$hstate`) with row
-/// builder `$rows` (`m7k_rows_mul`). Its state, the `#[ram]` static
+/// `$name`, a floor following a camera (`M7K_CAMERA` until its
+/// `set_camera`), building its rows into transport `$hdma` (state
+/// `$hstate`) with row builder `$rows` (`m7k_rows_mul`). Its state, the `#[ram]` static
 /// `$state`, takes about 920 bytes.
-macro_rules! m7k_floor($name:ident, $state:ident, $hdma:ident, $hstate:ident, $camera:ident, $rows:ident) {
+macro_rules! m7k_floor($name:ident, $state:ident, $hdma:ident, $hstate:ident, $rows:ident) {
     /// A floor's state.
     struct $name {
         /// Properties `update()` reads: camera height 0..127, and pitch in
@@ -226,6 +226,8 @@ macro_rules! m7k_floor($name:ident, $state:ident, $hdma:ident, $hstate:ident, $c
         key_sky: [u8; 2],
         key_ground: [u8; 2],
         key_tstamp: [u8; 2],
+        /// The camera the build follows.
+        camera: *M7Camera,
     }
 
     #[ram]
@@ -237,6 +239,7 @@ macro_rules! m7k_floor($name:ident, $state:ident, $hdma:ident, $hstate:ident, $c
         line_z: [0; 224], line_dist: [0; 224],
         key_angle: [0, 0], key_height: [0xFF, 0xFF], key_top: [0, 0], key_rows: [0, 0],
         key_stamp: [0, 0], key_sky: [0xFF, 0xFF], key_ground: [0, 0], key_tstamp: [0, 0],
+        camera: &M7K_CAMERA,
     };
 
     impl Mode7 for $name {
@@ -250,9 +253,12 @@ macro_rules! m7k_floor($name:ident, $state:ident, $hdma:ident, $hstate:ident, $c
             $state.key_sky[1] = 0xFF;
         }
 
-        /// The transport's stop. In vblank.
-        fn stop() {
-            $hdma::stop();
+        fn set_camera(cam: *M7Camera) {
+            $state.camera = cam;
+        }
+
+        fn camera() -> *M7Camera {
+            return $state.camera;
         }
 
         /// Builds the floor over the whole transport from the camera, the
@@ -302,7 +308,8 @@ macro_rules! m7k_floor($name:ident, $state:ident, $hdma:ident, $hstate:ident, $c
             }
             let size: u16 = m7k_recip($state.line_z[lo] as u8);
             let rn, rm = m7k_abs(r);
-            let mut off: i16 = m7k_mul_shr8(rm, size) as i16;
+            let o_lo, o_hi = mul16_wide(rm, size);
+            let mut off: i16 = ((o_hi << 8) | (o_lo >> 8)) as i16;
             if rn { off = 0 - off; }
             let mut sx: i16 = 128 + off;
             if $hstate.sel & 0x01 != 0 { sx = 255 - sx; }
@@ -350,6 +357,12 @@ macro_rules! m7k_floor($name:ident, $state:ident, $hdma:ident, $hstate:ident, $c
     }
 
     impl $name {
+        /// Leaves the floor: the transport's stop, which turns its
+        /// channels off at once. In vblank, straight after `wait_nmi!()`.
+        fn stop() {
+            $hdma::stop();
+        }
+
         // -- properties ---------------------------------------------------
 
         /// Camera height above the floor, 0..127 (higher is clamped).
@@ -371,24 +384,50 @@ macro_rules! m7k_floor($name:ident, $state:ident, $hdma:ident, $hstate:ident, $c
             return $state.pitch;
         }
 
-        /// The last build's horizon, a screen line.
-        fn sky() -> u8 {
-            return $state.sky;
-        }
-
-        /// The last build's ground lines, from the horizon down.
-        fn ground() -> u8 {
-            return $state.ground;
-        }
-
-        /// The last build's heading.
-        fn angle() -> u8 {
-            return $state.angle;
-        }
-
         /// The depth of the last `to_screen` point, in texels.
         fn depth() -> i16 {
             return $state.depth;
+        }
+
+        // -- tables -------------------------------------------------------
+
+        /// The per-line depth tables for camera height `h`, down from the
+        /// horizon to the foot (the most lines a full look down shows):
+        /// z(l), and the distance z(l)·(foot - l)/64 straight ahead on
+        /// line l.
+        fn rebuild_lines(h: u8) {
+            let foot: u8 = (224 - M7K_ROW_SKY[h as u16]) + M7K_PITCH_DOWN as u8;
+            let step: u16 = M7K_ROW_STEP[h as u16];
+            let mut zr: u16 = M7K_ROW_ZR0[h as u16];
+            // the distance's multiply is z times the lines left to the
+            // foot, counted down in WRMPYB's byte
+            let mut left: u16 = (foot as u16) << 8;
+            let mut l: u16 = 0;
+            while l < foot as u16 {
+                let mut zi: u16 = zr >> 4;
+                if zi > M7K_ZRECIP_LAST { zi = M7K_ZRECIP_LAST; }
+                let z: u16 = M7K_ZRECIP[zi] as u16;
+                WRMPY = z | left;
+                $state.line_z[l] = z;
+                zr = zr + step;
+                left = left - 0x100;
+                $state.line_dist[l] = RDMPY >> 6;
+                l++;
+            }
+            $state.foot = foot;
+            $state.built_height = h;
+        }
+    }
+
+    impl Mode7Scan for $name {
+        /// The last build's horizon, a screen line: its rows start there.
+        fn begin() -> u8 {
+            return $state.sky;
+        }
+
+        /// The bottom of the last build's band.
+        fn end() -> u8 {
+            return $state.sky + $state.ground;
         }
 
         /// The last build's center (M7X, M7Y), in texels.
@@ -400,8 +439,6 @@ macro_rules! m7k_floor($name:ident, $state:ident, $hdma:ident, $hstate:ident, $c
         fn scroll() -> u16, u16 {
             return $state.hofs, $state.vofs;
         }
-
-        // -- building -----------------------------------------------------
 
         /// Builds the band of `lines` lines from screen line `top` into the
         /// transport's back buffer, without publishing: the horizon (its
@@ -428,7 +465,8 @@ macro_rules! m7k_floor($name:ident, $state:ident, $hdma:ident, $hstate:ident, $c
             $state.sky = horizon;
             $state.ground = lines - sky;
 
-            let angle: u8 = $camera.angle;
+            let cam: *M7Camera = $state.camera;
+            let angle: u8 = cam.angle;
             $state.angle = angle;
             let s: i16 = m7k_sin(angle);
             let c: i16 = m7k_cos(angle);
@@ -453,39 +491,12 @@ macro_rules! m7k_floor($name:ident, $state:ident, $hdma:ident, $hstate:ident, $c
 
             // Center on the camera; the vertical term crosses zero on the
             // foot, below the band, so every ground line samples ahead.
-            let cx: u16 = $camera.x.texel();
-            let cy: u16 = $camera.y.texel();
+            let cx: u16 = cam.x.texel();
+            let cy: u16 = cam.y.texel();
             $state.cx = cx;
             $state.cy = cy;
             $state.hofs = cx - 128;
             $state.vofs = cy - (horizon as u16 + $state.foot as u16);
-        }
-
-        /// The per-line depth tables for camera height `h`, down from the
-        /// horizon to the foot (the most lines a full look down shows):
-        /// z(l), and the distance z(l)·(foot - l)/64 straight ahead on
-        /// line l.
-        fn rebuild_lines(h: u8) {
-            let foot: u8 = (224 - M7K_ROW_SKY[h as u16]) + M7K_PITCH_DOWN as u8;
-            let step: u16 = M7K_ROW_STEP[h as u16];
-            let mut zr: u16 = M7K_ROW_ZR0[h as u16];
-            // the distance's multiply is z times the lines left to the
-            // foot, counted down in WRMPYB's byte
-            let mut left: u16 = (foot as u16) << 8;
-            let mut l: u16 = 0;
-            while l < foot as u16 {
-                let mut zi: u16 = zr >> 4;
-                if zi > M7K_ZRECIP_LAST { zi = M7K_ZRECIP_LAST; }
-                let z: u16 = M7K_ZRECIP[zi] as u16;
-                M7K_WRMPY = z | left;
-                $state.line_z[l] = z;
-                zr = zr + step;
-                left = left - 0x100;
-                $state.line_dist[l] = RDMPY >> 6;
-                l++;
-            }
-            $state.foot = foot;
-            $state.built_height = h;
         }
 
         /// Publishes the last full-screen build: the lines above the
@@ -518,8 +529,8 @@ macro_rules! m7k_floor($name:ident, $state:ident, $hdma:ident, $hstate:ident, $c
     }
 }
 
-// The default floor: `M7K_CAMERA` over `M7HDMA`, on the multiplier.
-m7k_floor!(M7Floor, M7K_FLOOR, M7HDMA, M7K_HDMA, M7K_CAMERA, m7k_rows_mul);
+// The default floor: over `M7HDMA`, on the multiplier.
+m7k_floor!(M7Floor, M7K_FLOOR, M7HDMA, M7K_HDMA, m7k_rows_mul);
 
 // ============================================================================
 // LARGE ROM TABLES

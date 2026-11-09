@@ -4,7 +4,8 @@ Two perspective floors on one screen, each following its own camera, as in
 a two-player racer: `views.r65`'s `m7k_split!` over two floor instances.
 
 - The default floor `M7Floor` follows `M7K_CAMERA` in the top half; a
-  second instance, `FloorB` (`m7k_floor!`), follows `CAM_B` in the bottom.
+  second instance, `FloorB` (`m7k_floor!`), follows `CAM_B`
+  (`FloorB::set_camera(&CAM_B)`) in the bottom.
 - `Bands4` (`m7k_bands!`, four bands, no COLDATA) gives each half a Mode 1
   sky band over its Mode 7 floor.
 - `M7Views` sets each band's Mode 7 center and BG1 scroll by HDMA. The sky

@@ -1,11 +1,11 @@
 //! mode7kit flyer example: dizworld's Mode Y view, a perspective floor
 //! under a Mode 1 sky.
 //!
-//! `horizon.r65`: `Horizon`, the `M7Floor` floor with a sky. D-pad
+//! `horizon_bg.r65`: the `M7Floor` floor under `Horizon`, its sky. D-pad
 //! left/right turn, up/down fly, L/R lower and raise the camera, X/B tilt
 //! the view up and down, Start mirrors the view.
 //!
-//! Five world points are projected each frame with `Horizon::to_screen`
+//! Five world points are projected each frame with `M7Floor::to_screen`
 //! into `OBJECT_SCREEN`, where the tests read them.
 //!
 //! Graphics: dizworld by Brad Smith (CC BY 4.0), with art by Sharm and
@@ -17,7 +17,7 @@
 
 include!("stdlib/65816.r65")
 include!("stdlib/sneslib.r65")
-include!("mode7kit/horizon.r65")
+include!("mode7kit/horizon_bg.r65")
 
 #[bank(0)]
 
@@ -73,7 +73,7 @@ fn project_objects() {
     while i < OBJECTS {
         let x: M7Coord = M7Coord::from_texel(OBJECT_X[i]);
         let y: M7Coord = M7Coord::from_texel(OBJECT_Y[i]);
-        let sx, sy, _size = Horizon::to_screen(x, y);
+        let sx, sy, _size = M7Floor::to_screen(x, y);
         OBJECT_SCREEN[i << 1] = sx;
         OBJECT_SCREEN[(i << 1) + 1] = sy;
         i++;
@@ -90,12 +90,14 @@ fn update() {
     if held(JOY_X) && p < M7K_PITCH_UP { M7Floor::set_pitch(p + 2); }
     if held(JOY_B) && p > 0 - M7K_PITCH_DOWN { M7Floor::set_pitch(p - 2); }
     if pressed(JOY_START) {
-        Horizon::set_flip(Horizon::flip().toggle_h());
+        M7Floor::set_flip(M7Floor::flip().toggle_h());
     }
     // Up/Down along the heading, two texels a frame
     if held(JOY_UP) { M7K_CAMERA.forward(128); }
     if held(JOY_DOWN) { M7K_CAMERA.forward(-128); }
+    M7Floor::build(0, 224);
     Horizon::update();
+    M7Floor::publish();
     project_objects();
 }
 
@@ -106,6 +108,7 @@ fn update() {
 #[interrupt(nmi)]
 fn nmi_handler() {
     clear_nmi!();
+    M7Floor::nmi();
     Horizon::nmi();
     let hofs, vofs = Horizon::sky_scroll();
     BG2HOFS = hofs as u8;
@@ -137,9 +140,10 @@ fn main() -> ! {
     set_bg12_chr!(0, 6);             // BG2 chr at word $6000
     set_bg2_map!(0x1B, 0);           // BG2 map at word $6C00
 
-    Horizon::set_sky(0x01, 0x02, 0x01);              // Mode 1 sky: BG2; floor: BG1
+    Horizon::set_sky(BG::Mode1, 0x02, 0x01);              // Mode 1 sky: BG2; floor: BG1
     Horizon::set_haze(true);
-    Horizon::setup(M7Repeat::Wrap, M7Flip::None);
+    M7Floor::setup(M7Repeat::Wrap, M7Flip::None);
+    Horizon::setup();
     M7K_CAMERA.set(M7Coord::from_texel(512), M7Coord::from_texel(512));
     NMITIMEN = Interrupt::Nmi as u8 | Interrupt::AutoJoy as u8;
 

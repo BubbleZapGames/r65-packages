@@ -36,33 +36,33 @@ R65. The README is the user guide.
 ## Files and layers
 
 ```
-core.r65 ◄─┬─ rotate.r65 ◄── world.r65 ◄── static.r65         M7Static
-           ├─ scale.r65                    (rotate, scale, world)
-           │
-           └─ hdma.r65 ◄─┬─ floor.r65 ◄─┬─ horizon.r65         M7HDMA ◄ M7Floor ◄ Horizon
-                         │  (rotate,    │                       M7Bands ◄┘
-                         │   scale,     └─ views.r65            M7Views, m7k_split!
-                         │   world)        (floor, bands)
-                         └─ bands.r65 ◄───┘
+core.r65 ◄─┬─ scale.r65
+ (sin/cos, │
+  M7HDMA)  ├─ static.r65                            M7Static
+           │  (scale)
+           ├─ floor.r65 ◄─┬─ horizon_bg.r65         M7HDMA ◄ M7Floor ◄ Horizon
+           │  (scale)     │                          M7Bands ◄┘
+           │              └─ views.r65               M7Views, m7k_split!
+           │                 (floor, bands)
+           └─ bands.r65 ◄────┘
 ```
 
 | Layer | File | Writes | Default instance | `Mode7`? | ROM | RAM |
 |---|---|---|---|---|---|---|
-| core | `core.r65` | the `Mode7` trait, `M7Coord`, `M7Repeat`, `M7Flip`, register writers, the DMA channel array, the multiplies, uploads | | | code | none |
-| tables | `rotate.r65`, `scale.r65` | `m7k_sin/cos`, `m7k_heading`; `m7k_recip` | | | 640 B, 512 B | none |
-| world | `world.r65` | `M7Camera`, `m7k_delta`, tile lookup | `M7K_CAMERA` | | code | 5 B a camera |
-| flat view | `static.r65` | `M7Static` | `M7K_STATIC` | yes | code | 29 B |
-| transport | `hdma.r65` | `m7k_hdma!`: per-line matrices, double buffer, indirect tables, M7SEL and the view, HDMAEN | `M7HDMA` (224 lines, ch 2–3) | no | code | 16·lines + 151 B |
-| floor | `floor.r65` | `m7k_floor!`: a camera's perspective floor in a transport, its projections | `M7Floor` | yes | 2961 B | 934 B |
+| core | `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Repeat`, `M7Flip`, `m7k_sin/cos`, `m7k_heading`, `M7Camera`, register writers, the DMA channel array, the multiplies, uploads | `M7K_CAMERA` | | 640 B (sin/cos) | 5 B a camera |
+| table | `scale.r65` | `m7k_recip` | | | 512 B | none |
+| flat view | `static.r65` | `M7Static` | `M7K_STATIC` | yes | code | 31 B |
+| transport | `core.r65` | `m7k_hdma!`: per-line matrices, double buffer, indirect tables, M7SEL and the view, HDMAEN | `M7HDMA` (224 lines, ch 2–3) | no | code | 16·lines + 151 B |
+| floor | `floor.r65` | `m7k_floor!`: a camera's perspective floor in a transport, its projections | `M7Floor` | yes, and `Mode7Scan` | 2961 B | 936 B |
 | bands | `bands.r65` | `m7k_bands!`: per-line BGMODE, TM and the haze | `M7Bands` (3 bands, ch 4–6) | no | 33 B | 127 B |
-| preset | `horizon.r65` | `m7k_horizon!`: a floor with a sky, a haze, a HUD | `Horizon` | yes | | 15 B |
+| background | `horizon_bg.r65` | `m7k_horizon!`: a sky, a haze and a HUD for a floor | `Horizon` | no: it reads its floor | | 15 B |
 | views | `views.r65` | `m7k_views!`: per-band M7X/M7Y and BG1 scroll; `m7k_split!`: two floors stacked | `M7Views` (4 views, ch 1 and 7) | the split | | 201 B |
 
 A game includes the file of the view it uses:
 
 ```rust
 include!("mode7kit/static.r65")       // M7Static, the camera, the tables it uses
-include!("mode7kit/horizon.r65")      // Horizon over M7Floor over M7HDMA, with M7Bands
+include!("mode7kit/horizon_bg.r65")   // M7Floor over M7HDMA, and Horizon, its sky on M7Bands
 include!("mode7kit/views.r65")        // a split screen: views, and the floor and bands
 ```
 
@@ -95,7 +95,7 @@ type, its impls and its state static, the nscene pattern
 
 ```rust
 m7k_hdma!(M7HDMA, M7K_HDMA, 224, 2, 3);
-m7k_floor!(M7Floor, M7K_FLOOR, M7HDMA, M7K_HDMA, M7K_CAMERA, m7k_rows_mul);
+m7k_floor!(M7Floor, M7K_FLOOR, M7HDMA, M7K_HDMA, m7k_rows_mul);
 m7k_bands!(M7Bands, M7K_BANDS, M7HDMA, 3, 4, 5, 6);
 m7k_horizon!(Horizon, M7K_HORIZON, M7Floor, M7Bands);
 m7k_views!(M7Views, M7K_VIEWS, M7HDMA, 4, 1, 7);
@@ -104,7 +104,7 @@ m7k_views!(M7Views, M7K_VIEWS, M7HDMA, 4, 1, 7);
 | Macro | Parameters |
 |---|---|
 | `m7k_hdma!(Name, STATE, lines, ch_ab, ch_cd)` | `lines`: matrix rows a buffer holds, at most 224. The channels for M7A/B and M7C/D. |
-| `m7k_floor!(Name, STATE, Hdma, HDMA_STATE, CAMERA, rows)` | The transport it writes into, by type and state static; the `M7Camera` static it follows; `rows`, the row-builder macro (`m7k_rows_mul`). |
+| `m7k_floor!(Name, STATE, Hdma, HDMA_STATE, rows)` | The transport it writes into, by type and state static; `rows`, the row-builder macro (`m7k_rows_mul`). The camera is set at run time (`set_camera`). |
 | `m7k_bands!(Name, STATE, Hdma, max, ch_mode, ch_tm, ch_col)` | Up to `max` bands; BGMODE, TM and COLDATA channels. The arm without `ch_col` has no COLDATA channel and no haze. |
 | `m7k_horizon!(Name, STATE, Floor, Bands)` | The floor and bands it combines. |
 | `m7k_views!(Name, STATE, Hdma, max, ch_center, ch_scroll)` | Up to `max` views; the M7X/M7Y and BG1 scroll channels. |
@@ -139,16 +139,19 @@ m7k_views!(M7Views, M7K_VIEWS, M7HDMA, 4, 1, 7);
 
 ## core.r65: the `Mode7` trait
 
-`core.r65` holds no state. It has the trait the views implement, the
-M7SEL enums, `M7Coord`, two stateless register writers, the DMA channel
-array (see [Instance macros](#instance-macros)), the fixed-point multiplies
-and the upload macros.
+`core.r65` has the trait the views implement, the M7SEL enums, `M7Coord`,
+the camera (below), two stateless register writers, the DMA channel array
+(see [Instance macros](#instance-macros)), the fixed-point multiplies and
+the upload macros. Its one state is the default camera, `M7K_CAMERA`, and
+its one table the sin/cos table (below), which the camera's movement and
+every view's matrix read.
 
 ```rust
 trait Mode7 {
     fn setup(repeat: M7Repeat, flip: M7Flip);   // BGMODE 7, M7SEL, the mode's own hardware
-    fn stop() { }                               // leave the mode; in vblank
-    fn update();                                // build the next frame from M7Camera + properties
+    fn set_camera(cam: *M7Camera);              // the camera update() follows (M7K_CAMERA until set)
+    fn camera() -> *M7Camera;                   // that camera
+    fn update();                                // build the next frame from the camera + properties
     fn nmi();                                   // commit the built frame; from the NMI handler
     fn to_screen(x: M7Coord, y: M7Coord) -> i16, i16, u16;   // sx, sy, texel size (8.8 px)
     fn to_world(sx: i16, sy: i16) -> bool, M7Coord, M7Coord; // on the map?, x, y
@@ -175,8 +178,9 @@ trait Mode7 {
   every view: sx, sy, and the on-screen size of one texel there (8.8
   pixels). sy is `M7K_HIDDEN` (0x7FFF) for a point that can't be drawn,
   which only the floor ever returns.
-- **`stop()`** is a no-op by default; the HDMA views override it to
-  release their channels. See [Switching modes](#switching-modes).
+- **No `stop()` in the trait.** Only the HDMA views have anything to
+  release, so `stop()` is their own function, not a `Mode7` method; a
+  Static view has none. See [Switching modes](#switching-modes).
 
 `M7_CENTER_X` / `M7_CENTER_Y` (128, 112) are the screen center, the usual
 pivot.
@@ -247,8 +251,8 @@ its low byte, then its high byte.
 
 ### Fixed-point multiplies
 
-All of mode7kit's multiplies use the SNES 8×8 unit through one plain-R65
-declaration, `#[hw(0x4202)] static mut M7K_WRMPY: u16`. WRMPYA and WRMPYB
+All of mode7kit's multiplies use the SNES 8×8 unit through stdlib's
+`#[hw(0x4202)] static mut WRMPY: u16`. WRMPYA and WRMPYB
 are adjacent, so one 16-bit store loads both bytes and starts the multiply
 (WRMPYB is written last). `NOP(4)` covers the 8-cycle wait, then `RDMPY` is
 read. That is about half the cost of a far `mul8` call, and stays in m16.
@@ -259,16 +263,18 @@ WRMPYA already loaded.
 | Helper | Computes |
 |---|---|
 | `m7k_abs(v: i16) -> bool, u16` | sign and magnitude |
-| `m7k_umul32(x: u16, y: u16) -> u16, u16` | full product (high, low); skips partial products of a zero high byte |
 | `m7k_mul_q8` / `m7k_smul_q8(m, k)` | (m · k) >> 8 for \|m\| ≤ 256: two multiplies |
 | `m7k_rotate14(s, c, dx, dy) -> i16, i16` | A 10.6 offset turned into view space, (forward, right) in texels: eight multiplies inline (`m7k_tprod!`), each product's magnitude >> 14, then signed |
-| `m7k_mul_shr8(a, b)` | (a · b) >> 8 for a < 1024, b < 4096: four multiplies, no 32-bit carries |
-| `m7k_smul_shr14`, `m7k_smul_shr8`, `m7k_smul_shr2` | general signed products, bits 14.., 8.., 2.. |
+| `m7k_smul_shr14`, `m7k_smul_shr8`, `m7k_smul_shr2` | general signed products, bits 14.., 8.., 2.., by sign and magnitude through stdlib's `mul16_wide` |
+
+The full 16×16 → 32 product is stdlib's `mul16_wide(a, b) -> lo, hi`, which
+uses the same one-store pairs and skips the partial products of a zero high
+byte. mode7kit has no multiply of its own beside it.
 
 
-## rotate.r65
+### Sin and cos
 
-LUT:
+`core.r65`'s one table:
 
 ```rust
 const fn build_sincos() -> [i16; 320] {
@@ -317,15 +323,15 @@ T[128] = 0x0080 (2×), T[255] = 0x0040 (≈4×).
 `M7Static` uses it for its scale, and the floor for a texel's on-screen
 size (`M7K_RECIP[z]` is 1/k in 8.8).
 
-## world.r65
+## The camera and world coordinates (core.r65)
 
-This file holds the camera type, the default camera `M7K_CAMERA`, and the
+`core.r65` holds the camera type, the default camera `M7K_CAMERA`, and the
 coordinate helpers the projections share.
 
 ### The coordinate type
 
 ```rust
-struct M7Coord(u16);   // 10.6 fixed-point texels, in core.r65
+struct M7Coord(u16);   // 10.6 fixed-point texels
 ```
 
 `M7Coord` lives in `core.r65`, since the trait's signatures name it.
@@ -368,10 +374,14 @@ The methods take `*self`, so a game may have several cameras
 | `strafe(speed: i16)` | Moves across the heading, toward the screen's right (`m7k_heading(angle − 64)`); negative moves left |
 | `move_by(dx: i16, dy: i16)` | Adds a 10.6 delta. Wraps for free. |
 
-`M7Static` and the default floor both follow `M7K_CAMERA`, so switching
-between them keeps the view where it was; a floor instance names the
-camera it follows. A negative speed turns the heading a half turn rather
-than negating the delta.
+Every view follows `M7K_CAMERA` until its `set_camera(&cam)`, so switching
+between `M7Static` and a floor keeps the view where it was. A view keeps
+the pointer in its state, not a copy, so the game moves the camera and the
+next `update()` follows. The pointer is near, so a camera must be a
+`#[lowram]` static (a `#[ram]` one's address is far and won't type-check).
+`m7k_split!`'s `set_camera` sets the top floor's, and the bottom floor
+takes its own. A negative speed turns the heading a
+half turn rather than negating the delta.
 
 **Sub-texel camera.** The Mode 7 registers take whole texels only, so the
 picture moves in whole-texel steps. When zoomed in 4×, a slowly moving
@@ -530,11 +540,11 @@ flip the camera point appears at 255 − px. With the default center pivot it
 stays where it was.
 
 Each of these is 4 signed multiplies (`m7k_smul_shr14` / `m7k_smul_shr2`),
-done by sign and magnitude through `m7k_umul32`. The
+done by sign and magnitude through `mul16_wide`. The
 results aren't clipped: a point off screen just has coordinates outside
 0..255 / 0..223, and the game decides whether to draw it.
 
-## hdma.r65: the transport
+## core.r65: the transport
 
 `m7k_hdma!` writes the transport: one Mode 7 matrix a scanline by indirect
 HDMA, double-buffered, with no math. A floor or a custom effect fills its
@@ -571,6 +581,33 @@ static mut $state: $name = /* identity top, all zero, sel 0 */;
 | `publish(top, rows)` | A custom frame: lines 0..top hold the top matrix, line top + r reads row r, and the table ends after them |
 | `begin()`, `seg_top(p, lines)`, `seg_rows(p, row, lines)`, `finish(p, floor)`, `finish_same(floor)` | A frame of several segments, for a preset |
 | `LINES` | The rows a buffer holds |
+
+### The `Mode7Scan` trait
+
+`core.r65` also declares the trait a per-line view implements on top of
+`Mode7`. It knows nothing of skies or horizons: a build renders rows into
+a region of lines, `begin()..end()`, and the lines above it, down from the
+build's `top`, show the transport's top matrix. That is all the presets
+need to put a band over the lines above one, or to stack two in a split,
+without knowing how it computes its rows.
+
+```rust
+trait Mode7Scan: Mode7 {
+    fn build(top: u8, lines: u8);   // rows, center, scroll into the back buffer; no publish
+    fn publish();                   // the last full-screen build as the next frame
+    fn commit() -> bool, u8;        // the transport's, for a preset's nmi()
+    fn begin() -> u8;               // the first screen line the last build rendered rows into
+    fn end() -> u8;                 // one past its last: the region is begin()..end()
+    fn center() -> u16, u16;        // its M7X, M7Y
+    fn scroll() -> u16, u16;        // its M7HOFS, M7VOFS
+}
+```
+
+`m7k_floor!` implements it: `begin()` is its horizon, `end()` the bottom
+of its band. `m7k_horizon!` and `m7k_split!` call only `Mode7` and
+`Mode7Scan` methods on their floors, and read a sky's parallax from the
+floor's `camera()`, so another floor (a true pitch, a game's own effect)
+that implements both drops in by name.
 
 ### HDMA layout
 
@@ -611,10 +648,12 @@ changes the tables and not the rows.
   writes M7SEL (without the vertical bit for a floor), the center and the
   scroll with `m7k_write_view`. It always writes HDMAEN from the shadow,
   and never M7A–D. It returns whether it flipped and the buffer now shown.
-- **Add-ons follow the return value.** A preset's `nmi()` calls `commit()`
-  first and, when it flipped, points its bands' and views' channels at the
-  buffer returned. No add-on reads the transport's fields, and the order is
-  in the preset's code. All of it runs in vblank, and HDMA reloads A1Tn at
+- **Add-ons follow the front buffer.** The split preset's `nmi()` calls
+  `commit()` and, when it flipped, points its bands' and views' channels at
+  the buffer returned. `Horizon::nmi()` runs after its floor's `nmi()` and
+  points its bands at the front buffer (`back_index() ^ 1`), every frame:
+  the same buffer when nothing flipped. No add-on reads the transport's
+  fields. All of it runs in vblank, and HDMA reloads A1Tn at
   the top of a frame, so the channels never disagree on screen.
 - **The view follows the tables.** The view is written only on a frame
   that flips, so it never pairs with the other buffer. If a build doesn't
@@ -708,10 +747,11 @@ static mut $state: $name = /* height 64, pitch 0 */;
 | `to_screen`, `to_world` | The floor projection, [below](#world-projection) |
 | `sel()`, `set_sel()` | The transport's |
 | `set_height(h)`, `height()`, `set_pitch(p)`, `pitch()` | Properties the build reads; it clamps them and writes the clamped values back |
-| `sky()`, `ground()`, `angle()`, `depth()`, `center()`, `scroll()` | The last build's horizon line, ground lines, heading, projected depth, view |
-| `build(top, lines)` | The band of `lines` lines from screen line `top`: its rows, from row `top`, and its view; no publishing |
-| `publish()` | A full-screen frame of the last build: the top matrix down to the horizon, then the rows |
-| `commit() -> bool, u8` | The transport's, for a preset's `nmi()` |
+| `depth()` | The last projected point's depth |
+| `begin()`, `end()`, `center()`, `scroll()` | `Mode7Scan`: the last build's rows (horizon to band bottom) and view |
+| `build(top, lines)` | `Mode7Scan`: the band of `lines` lines from screen line `top`: its rows, from row `top`, and its view; no publishing |
+| `publish()` | `Mode7Scan`: a full-screen frame of the last build: the top matrix down to the horizon, then the rows |
+| `commit() -> bool, u8` | `Mode7Scan`: the transport's, for a preset's `nmi()` |
 | `rebuild_lines(h)` | The line tables for height h; the build calls it when the height changes |
 
 **Bands.** `build(top, lines)` puts the horizon at `top + sky`, the sky
@@ -783,7 +823,7 @@ line samples ahead of the camera.
 build: `m7k_rows_mul`. It is one loop per sign quadrant, so a row applies
 no sign: each quadrant's loop computes its A, B and C from the magnitudes
 with the signs written in (`0 − ma`, or `ma`). The first product is one
-16-bit store, `M7K_WRMPY = z | cos7 << 8`, which loads WRMPYA and WRMPYB
+16-bit store, `WRMPY = z | cos7 << 8`, which loads WRMPYA and WRMPYB
 and starts it. WRMPYA keeps z, so the second is one store of the sin byte
 to WRMPYB alone (`M7K_WRMPYB`, a word at $4203 whose high byte lands
 harmlessly in WRDIVL). The A and D stores fill the second product's
@@ -868,7 +908,7 @@ dist(l) = k(l) · (foot − l) = z(l) · (foot − l) / 64
 
 That depends on height but not on heading or pitch, so `rebuild_lines`
 fills it with `line_z`, only when the height changes; its multiply is a
-`M7K_WRMPY` store of z and the lines left to the foot.
+`WRMPY` store of z and the lines left to the foot.
 
 `to_screen(x: M7Coord, y: M7Coord) -> i16, i16, u16`:
 
@@ -888,7 +928,7 @@ fills it with `line_z`, only when the height changes; its multiply is a
 5. Binary-search `line_dist`, which falls from the horizon down, for the
    line l whose distance is nearest below f. That's 8 compares and no
    multiply, giving sy = horizon + l.
-6. sx = 128 ± (|r| · `M7K_RECIP[z(l)]`) >> 8, by `m7k_mul_shr8`.
+6. sx = 128 ± (|r| · `M7K_RECIP[z(l)]`) >> 8, bits 8..23 of `mul16_wide`.
    `M7K_RECIP[z]` = 16384/z is 1/k in 8.8, the scale table in `scale.r65`
    (this is why `floor.r65` includes it).
 7. The third result is `M7K_RECIP[z(l)]`, the on-screen size of one texel in
@@ -927,7 +967,7 @@ Cost: 13 scanlines per visible object, 8 behind the camera, 4 culled (see
 `m7k_bands!` writes a bands type: the screen as up to `max` runs of lines,
 each with its own BGMODE and TM, and optionally a 16-line haze ramp at the
 top of one band. Its tables are double-buffered with a transport and shown
-by a preset's `nmi()` when `commit()` flips.
+with its front buffer (`show(k)`, `front_index()`).
 
 | Channel | Register | Table | Mode |
 |---|---|---|---|
@@ -942,39 +982,50 @@ dizworld's `build_fade_table`.
 
 | Function | Does |
 |---|---|
-| `set_count(n)`, `set_band(i, lines, mode, tm)`, `set_lines(i, lines)` | The layout. The last band takes the rest of the screen, whatever its `lines`. A change bumps the version. |
+| `set_count(n)`, `set_band(i, lines, mode, tm)`, `set_lines(i, lines)` | The layout: `mode` is sneslib's `BG`, `tm` the TM byte. The last band takes the rest of the screen, whatever its `lines`. A change bumps the version. |
 | `set_haze(i)` | The ramp at the top of band i (`M7K_NO_HAZE`: none); needs a COLDATA channel. Before `setup`. |
 | `setup()` | The channels on buffer 0, both buffers filled; with a haze, the ramp's copy, CGWSEL = 0 and CGADSUB = add on BG1; the channels in the transport's shadow |
 | `stop()` | The channels out of the shadow. BGMODE, TM and COLDATA keep the last values their tables wrote. |
 | `fill_back()`, `fill(k)` | The back buffer's tables, skipped when its key matches the version; buffer k's, always |
 | `show(k)` | Points the channels at buffer k |
+| `back_index()`, `front_index()` | The transport's buffer being built, and the one on screen after its `commit()` |
 
 The tables are written in place with direct stores (`m7k_band_hold!`,
 `m7k_band_ind!`), not the far-pointer table writers.
 
-## horizon.r65: `Horizon`
+## horizon_bg.r65: `Horizon`
 
-`m7k_horizon!` writes the preset of dizworld's view: a floor with a sky
-band in another BG mode above it, a haze under the horizon, and an
-optional HUD band under the floor. It implements `Mode7` over a floor and
-bands; their bands are the sky (the floor's `sky()` lines), the floor
-(Mode 7, the floor's `ground()` lines) and the HUD.
+`m7k_horizon!` writes the background of dizworld's view: a sky band in
+another BG mode above a floor, a haze under the horizon, and an optional
+HUD band under the floor. It is **not a `Mode7`**. It names its floor (any
+`Mode7Scan`) and reads the floor's last build, `begin()`, `end()` and
+`camera()`; its bands are the sky (the lines above `begin()`), the floor
+(Mode 7, `begin()..end()`) and the HUD. The game keeps the floor as its
+view: it sets the floor up, builds and publishes it, commits it in the
+NMI handler and projects through it.
+
+The bands must be filled for the frame the floor publishes, so the game
+splits the floor's `update()` around the background's:
+
+```rust
+M7Floor::build(0, 224 - hud);   // hud is 0 without a HUD band
+Horizon::update();
+M7Floor::publish();
+```
 
 | Function | Does |
 |---|---|
-| `set_sky(sky_mode, sky_tm, ground_tm)`, `set_haze(on)` | Before `setup`. Defaults: Mode 1, BG2 sky, BG1 floor, no haze. |
-| `set_hud(lines, mode, tm)` | A band of `lines` at the bottom (0: none); the floor builds `224 − lines`. Before `setup`. |
-| `setup(repeat, flip)` | The floor's setup, then the bands: split at line 64, the floor, the HUD |
-| `stop()` | The bands', then the floor's |
-| `update()` | The floor's `build(0, 224 − hud)`, the sky and floor bands' lines at its horizon, `fill_back()`, the next sky scroll, the floor's `publish()` |
-| `nmi()` | The floor's `commit()`; if it flipped, the bands' `show(k)` and the shown sky scroll |
-| `to_screen`, `to_world`, `sel`, `set_sel` | The floor's |
+| `set_sky(sky_mode: BG, sky_tm, ground_tm)`, `set_haze(on)` | Before `setup`. Defaults: `BG::Mode1`, BG2 sky, BG1 floor, no haze. |
+| `set_hud(lines, mode: BG, tm)` | A band of `lines` at the bottom (0: none); the floor builds `224 − lines`. Before `setup`. |
+| `setup()` | The bands: split at line 64, the floor, the HUD. After the floor's `setup`. |
+| `stop()` | The bands'. The floor stops on its own. |
+| `update()` | The sky and floor bands' lines at the floor's `begin()`/`end()`, `fill_back()`, and the back buffer's sky scroll. After the floor's `build`, before its `publish`. |
+| `nmi()` | The bands' `show` of the front buffer. After the floor's `nmi()`. |
 | `sky_scroll() -> u16, u16` | dizworld's BG2 parallax for the frame on screen: hofs = −(angle·4) & 0x3FF, vofs = 240 − horizon. Read in the NMI handler, after `nmi()`. |
 
-The floor's properties stay on the floor (`M7Floor::set_height`). The
-delegates unpack and return the floor's values (`let a, b, c =
-M7Floor::to_screen(x, y); return a, b, c;`), since R65's `return f();`
-can't forward several values.
+The sky scroll is kept per transport buffer, like the bands' tables, so
+`nmi()` needs no flip flag: whatever buffer is in front, its bands and its
+scroll go together.
 
 ## views.r65: views and the split screen
 
@@ -1016,7 +1067,7 @@ camera, each half a sky band and a floor band.
 A game with several views switches in vblank, straight after `wait_nmi!()`:
 
 ```rust
-Old::stop();
+Old::stop();                              // when Old is an HDMA view
 New::setup(New::repeat(), New::flip());   // the camera is shared, so the view carries over
 // and the NMI handler now calls New::nmi()
 ```
@@ -1096,8 +1147,8 @@ work at 60 fps. The bench's own overhead is 1 line.
   locals and indexing (`T[pos] = v`, `M7K_SINCOS[a as u16]`), and let the
   compiler choose registers. A write-twice register is written as
   `REG = v as u8; REG = (v >> 8) as u8;`.
-- The hardware multiplier is driven through the `#[hw]` words `M7K_WRMPY`
-  and `M7K_WRMPYB` and stdlib's `RDMPY`, with `NOP(n)` for the wait, or
+- The hardware multiplier is driven through stdlib's `WRMPY` and `RDMPY`
+  and mode7kit's `#[hw]` word `M7K_WRMPYB`, with `NOP(n)` for the wait, or
   the stores the wait can hold. DMA channels go through `M7K_DMA[n]`.
 - Statics are named `M7K_*`, free functions `m7k_*`, instance macros
   `m7k_*!`. Public types are the `Mode7` trait, `M7Static`, `M7Coord`,
@@ -1132,10 +1183,10 @@ attribution) and draw no sprites.
 - **`examples/topdown/`** includes `static.r65`. The D-pad moves along and
   across the heading (`M7K_CAMERA.forward` / `strafe`), L/R turn, A/X zoom
   both axes, Y/B stretch only the vertical axis (`M7Static::set_zoom`).
-- **`examples/flyer/`** includes `horizon.r65`: the default instances.
+- **`examples/flyer/`** includes `horizon_bg.r65`: the default instances.
   dizworld's controls; L/R change the floor's height, X/B its pitch, Start
   toggles `Horizontal`. It projects five world points with
-  `Horizon::to_screen` into `OBJECT_SCREEN` for the tests.
+  `M7Floor::to_screen` into `OBJECT_SCREEN` for the tests.
 - **`examples/split/`** includes `views.r65`: a second camera and floor
   instance, four bands without COLDATA, and `m7k_split!`. Pad 1's D-pad
   drives the top camera, Y/A/X/B the bottom one.
@@ -1149,9 +1200,10 @@ attribution) and draw no sprites.
 `tests/` holds three test ROMs:
 
 - **`tests/switch/`**: one game with both modes, switching between
-  `Horizon` and `M7Static` in vblank when a test writes `REQUEST`.
+  `M7Floor` under `Horizon` and `M7Static` in vblank when a test writes
+  `REQUEST`.
 - **`tests/options/`**: non-default instances in three scenes: a 160-line
-  transport on channels 1 and 3 under `Horizon` with a HUD band and bands
+  transport on channels 1 and 3, a floor under a `Horizon` with a HUD band and bands
   without COLDATA; a custom per-line effect on it; and `M7Static` on data
   uploaded by `mode7_upload_split!`, probing `to_world`.
 - **`tests/bench/`**: the [cycle budget](#cycle-budget), with a budget per

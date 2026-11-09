@@ -1,11 +1,11 @@
 //! mode7kit bands: the screen split into runs of lines, each with its own
 //! BG mode and main-screen layers, and an optional haze.
 //!
-//! Includes `hdma.r65`. Adds `M7K_FADE` (33 bytes). `m7k_bands!` writes a
+//! Includes `core.r65`. Adds `M7K_FADE` (33 bytes). `m7k_bands!` writes a
 //! bands type: per-line BGMODE and TM (and COLDATA for the haze) by
 //! direct-mode HDMA, double-buffered with a transport and shown on its
 //! `commit()`. A sky band in Mode 1 over a Mode 7 floor is `Horizon`
-//! (`horizon.r65`); a HUD band under the floor is one more band.
+//! (`horizon_bg.r65`); a HUD band under the floor is one more band.
 //!
 //! The default instance is `M7Bands` (state `M7K_BANDS`): up to 3 bands
 //! on channels 4 (BGMODE), 5 (TM) and 6 (COLDATA), with `M7HDMA`.
@@ -14,15 +14,15 @@
 //! m7k_bands!(Two, TWO, M7HDMA, 2, 4, 5);       // 2 bands, no COLDATA
 //!
 //! Two::set_count(2);
-//! Two::set_band(0, 64, 0x01, 0x02);      // 64 lines of Mode 1, BG2
-//! Two::set_band(1, 0, 0x07, 0x01);       // the rest: Mode 7, BG1
+//! Two::set_band(0, 64, BG::Mode1, 0x02);    // 64 lines of Mode 1, BG2
+//! Two::set_band(1, 0, BG::Mode7, 0x01);     // the rest: Mode 7, BG1
 //! Two::setup();                          // after the transport's setup
 //! // each frame, before the transport's finish:  Two::fill_back();
 //! // in the NMI handler:  let flipped, k = M7HDMA::commit();
 //! //                      if flipped { Two::show(k); }
 //! ```
 
-include!("mode7kit/hdma.r65")
+include!("mode7kit/core.r65")
 
 const fn m7k_build_fade() -> [u8; 33] {
     let mut t: [u8; 33] = [0; 33];
@@ -203,11 +203,21 @@ macro_rules! m7k_bands_impl($name:ident, $state:ident, $hdma:ident, $max:expr, $
 
         /// Band `i`: `lines` lines (the last band takes the rest of the
         /// screen, whatever its `lines`), BGMODE `mode`, TM `tm`.
-        fn set_band(i: u8, lines: u8, mode: u8, tm: u8) {
+        fn set_band(i: u8, lines: u8, mode: BG, tm: u8) {
             $state.lines[i as u16] = lines;
-            $state.mode[i as u16] = mode;
+            $state.mode[i as u16] = mode as u8;
             $state.tm[i as u16] = tm;
             $state.version = $state.version + 1;
+        }
+
+        /// The transport's buffer being built, which `fill_back` fills.
+        fn back_index() -> u8 {
+            return $hdma::back_index();
+        }
+
+        /// The transport's buffer on screen, after its `commit()`.
+        fn front_index() -> u8 {
+            return $hdma::back_index() ^ 1;
         }
 
         /// Band `i`'s height, for a split that moves each frame.

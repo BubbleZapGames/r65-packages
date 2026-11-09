@@ -18,10 +18,11 @@
 //! #[lowram]
 //! static mut CAM2: M7Camera = M7Camera { x: M7Coord(0x8000), y: M7Coord(0x8000), angle: 0 };
 //!
-//! m7k_floor!(Floor2, FLOOR2, M7HDMA, M7K_HDMA, CAM2, m7k_rows_mul);
+//! m7k_floor!(Floor2, FLOOR2, M7HDMA, M7K_HDMA, m7k_rows_mul);
 //! m7k_bands!(Bands4, BANDS4, M7HDMA, 4, 4, 5);       // 4 bands, no COLDATA
 //! m7k_split!(Split, SPLIT, M7HDMA, Bands4, M7Views, M7Floor, Floor2);
 //!
+//! Floor2::set_camera(&CAM2);                        // the top keeps M7K_CAMERA
 //! Split::setup(M7Repeat::Wrap, M7Flip::None);       // force blank
 //! loop { wait_nmi!(); Split::update(); }
 //!
@@ -147,14 +148,14 @@ macro_rules! m7k_views($name:ident, $state:ident, $hdma:ident, $max:expr, $ch_ce
 }
 
 /// `$name`, a split screen: floor `$fa` over lines 0..half and `$fb` under
-/// it, on transport `$hdma`, with bands `$bands` (at least 4) and views
+/// it (each any `Mode7Scan` on `$hdma`), on transport `$hdma`, with bands `$bands` (at least 4) and views
 /// `$views` (at least 4): per half, a sky band then a floor band. The sky
 /// layer is BG1 in the sky's BG mode, so the views' BG1 scroll gives each
 /// half's sky its own scroll, with no channel more; the game points BG1SC
 /// and BG12NBA at the sky (Mode 7 ignores them).
 macro_rules! m7k_split($name:ident, $state:ident, $hdma:ident, $bands:ident, $views:ident, $fa:ident, $fb:ident) {
     struct $name {
-        sky_mode: u8,
+        sky_mode: BG,
         sky_tm: u8,
         ground_tm: u8,
         /// Lines of the top half.
@@ -163,13 +164,21 @@ macro_rules! m7k_split($name:ident, $state:ident, $hdma:ident, $bands:ident, $vi
 
     #[lowram]
     static mut $state: $name = $name {
-        sky_mode: 0x01, sky_tm: 0x01, ground_tm: 0x01, half: 112,
+        sky_mode: BG::Mode1, sky_tm: 0x01, ground_tm: 0x01, half: 112,
     };
 
     impl $name {
+        /// The views', the bands' and the transport's stop (both floors
+        /// share it). In vblank.
+        fn stop() {
+            $views::stop();
+            $bands::stop();
+            $fa::stop();
+        }
+
         /// The sky bands' BGMODE and TM (BG1 is the sky), and the floors'
         /// TM. Before `setup`.
-        fn set_sky(sky_mode: u8, sky_tm: u8, ground_tm: u8) {
+        fn set_sky(sky_mode: BG, sky_tm: u8, ground_tm: u8) {
             $state.sky_mode = sky_mode;
             $state.sky_tm = sky_tm;
             $state.ground_tm = ground_tm;
@@ -196,9 +205,9 @@ macro_rules! m7k_split($name:ident, $state:ident, $hdma:ident, $bands:ident, $vi
             $fb::setup(repeat, flip);
             let half: u8 = $state.half;
             $bands::set_band(0, 32, $state.sky_mode, $state.sky_tm);
-            $bands::set_band(1, half - 32, 0x07, $state.ground_tm);
+            $bands::set_band(1, half - 32, BG::Mode7, $state.ground_tm);
             $bands::set_band(2, 32, $state.sky_mode, $state.sky_tm);
-            $bands::set_band(3, 0, 0x07, $state.ground_tm);
+            $bands::set_band(3, 0, BG::Mode7, $state.ground_tm);
             $bands::set_count(4);
             $bands::set_haze(M7K_NO_HAZE);
             $bands::setup();
@@ -210,10 +219,13 @@ macro_rules! m7k_split($name:ident, $state:ident, $hdma:ident, $bands:ident, $vi
             $views::setup();
         }
 
-        fn stop() {
-            $views::stop();
-            $bands::stop();
-            $fa::stop();
+        /// The top floor's camera; `$fb::set_camera` sets the bottom's.
+        fn set_camera(cam: *M7Camera) {
+            $fa::set_camera(cam);
+        }
+
+        fn camera() -> *M7Camera {
+            return $fa::camera();
         }
 
         /// Both floors' builds, each in its half, the bands at their
@@ -222,19 +234,23 @@ macro_rules! m7k_split($name:ident, $state:ident, $hdma:ident, $bands:ident, $vi
             let half: u8 = $state.half;
             $fa::build(0, half);
             $fb::build(half, 224 - half);
-            let sky_a: u8 = $fa::sky();
-            let ground_a: u8 = $fa::ground();
-            let sky_b: u8 = $fb::sky() - half;
-            let ground_b: u8 = $fb::ground();
+            let begin_a: u8 = $fa::begin();
+            let begin_b: u8 = $fb::begin();
+            let sky_a: u8 = begin_a;
+            let ground_a: u8 = $fa::end() - begin_a;
+            let sky_b: u8 = begin_b - half;
+            let ground_b: u8 = $fb::end() - begin_b;
+            let cam_a: *M7Camera = $fa::camera();
+            let cam_b: *M7Camera = $fb::camera();
             $bands::set_lines(0, sky_a);
             $bands::set_lines(1, ground_a);
             $bands::set_lines(2, sky_b);
             $bands::fill_back();
-            $name::sky_view(0, sky_a, $fa::angle(), $fa::sky());
+            $name::sky_view(0, sky_a, cam_a.angle, begin_a);
             let acx, acy = $fa::center();
             let ahofs, avofs = $fa::scroll();
             $views::set_view(1, ground_a, acx, acy, ahofs, avofs);
-            $name::sky_view(2, sky_b, $fb::angle(), $fb::sky());
+            $name::sky_view(2, sky_b, cam_b.angle, begin_b);
             let bcx, bcy = $fb::center();
             let bhofs, bvofs = $fb::scroll();
             $views::set_view(3, 0, bcx, bcy, bhofs, bvofs);

@@ -1,12 +1,12 @@
 //! mode7kit Static mode: one matrix a frame, committed in vblank.
 //!
-//! Includes `rotate.r65`, `scale.r65` and `world.r65`; adds no table.
-//! `M7Static` implements `Mode7` with its own copy of the matrix, its
-//! inverse, the center, the scroll and M7SEL, in the `M7K_STATIC`
+//! Includes `core.r65` and `scale.r65`; adds no table. `M7Static`
+//! implements `Mode7` with its own copy of the matrix, its inverse, the
+//! center, the scroll, M7SEL and its camera, in the `M7K_STATIC`
 //! singleton. It touches no HDMA register: a Static game owns HDMAEN and
 //! may run its own HDMA on any channel.
 //!
-//! `update()` turns the view to `M7Camera`'s heading, scales it by the
+//! `update()` turns the view to its camera's heading, scales it by the
 //! zoom, and pins the camera to the pivot pixel. A game that builds its
 //! own matrix skips `update()` and uses the manual setters below.
 //!
@@ -26,9 +26,8 @@
 //! fn vblank() { M7Static::nmi(); }
 //! ```
 
-include!("mode7kit/rotate.r65")
+include!("mode7kit/core.r65")
 include!("mode7kit/scale.r65")
-include!("mode7kit/world.r65")
 
 /// Static mode's state: the registers as the next vblank writes them,
 /// plus what the projections and `update()` need. Matrix entries are 8.8
@@ -58,6 +57,8 @@ struct M7Static {
     /// Zoom per screen axis, 64 = 1.0×: what `update()` scales by.
     zx: u8,
     zy: u8,
+    /// The camera `update()` follows.
+    camera: *M7Camera,
 }
 
 /// Starts as the identity at the screen center, so the first NMI after
@@ -70,22 +71,32 @@ static mut M7K_STATIC: M7Static = M7Static {
     cx: 0, cy: 0, hofs: 0, vofs: 0,
     px: 128, py: 112,
     zx: 64, zy: 64,
+    camera: &M7K_CAMERA,
 };
 
 impl Mode7 for M7Static {
     /// Puts the PPU in Mode 7 and sets M7SEL. The game still owns TM.
     fn setup(repeat: M7Repeat, flip: M7Flip) {
-        BGMODE = 0x07;
+        BGMODE = BG::Mode7 as u8;
         M7K_STATIC.sel = repeat as u8 | flip as u8;
         M7SEL = M7K_STATIC.sel;
+    }
+
+    fn set_camera(cam: *M7Camera) {
+        M7K_STATIC.camera = cam;
+    }
+
+    fn camera() -> *M7Camera {
+        return M7K_STATIC.camera;
     }
 
     /// Turns by the camera's heading, scales by the zoom, and pins the
     /// camera's texel to the pivot pixel.
     fn update() {
-        M7Static::rotate_scale(M7K_CAMERA.angle, M7K_STATIC.zx, M7K_STATIC.zy);
-        let cx: u16 = M7K_CAMERA.x.texel();
-        let cy: u16 = M7K_CAMERA.y.texel();
+        let cam: *M7Camera = M7K_STATIC.camera;
+        M7Static::rotate_scale(cam.angle, M7K_STATIC.zx, M7K_STATIC.zy);
+        let cx: u16 = cam.x.texel();
+        let cy: u16 = cam.y.texel();
         M7K_STATIC.cx = cx;
         M7K_STATIC.cy = cy;
         M7K_STATIC.hofs = cx - M7K_STATIC.px as u16;
