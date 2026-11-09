@@ -140,8 +140,8 @@ macro_rules! m7k_rows_mul($hstate:ident, $fstate:ident, $k:expr, $n:expr, $c:exp
     let m7k_k0: u16 = $k;
     let m7k_n: u16 = $n;
     if $fstate.lat != 0x100 {
-        let m7k_lc: u16 = m7k_stretch(m7k_hc, $fstate.lat);
-        let m7k_ls: u16 = m7k_stretch(m7k_hs, $fstate.lat);
+        let m7k_lc: u16 = m7k_mul_q8($fstate.lat, m7k_hc);
+        let m7k_ls: u16 = m7k_mul_q8($fstate.lat, m7k_hs);
         m7k_rows4!($hstate, $fstate, m7k_k0, m7k_n, m7k_lc, m7k_ls, m7k_hc, m7k_hs, $neg_c, $neg_s);
     } else if $neg_c {
         if $neg_s {
@@ -264,104 +264,7 @@ macro_rules! m7k_plain($name:ident, $state:ident, $hdma:ident, $hstate:ident, $r
         built_sx: 0, built_h: 0, lat: 0x100, lat_px: 0x100,
     };
 
-    impl Mode7 for $name {
-        /// The transport's setup (BGMODE 7, M7SEL and the matrix
-        /// channels), following camera `cam`.
-        fn setup(cam: *M7Camera, repeat: M7Repeat, flip: M7Flip) {
-            $state.camera = cam;
-            $hdma::setup(repeat, flip);
-            $state.built_sy = 0;
-            $state.key_gen[0] = 0xFF;
-            $state.key_gen[1] = 0xFF;
-            $state.key_sky[0] = 0xFF;
-            $state.key_sky[1] = 0xFF;
-        }
-
-        fn set_camera(cam: *M7Camera) {
-            $state.camera = cam;
-        }
-
-        fn camera() -> *M7Camera {
-            return $state.camera;
-        }
-
-        /// Builds the floor over the whole transport from the camera (its
-        /// position, heading, scales, height and pitch), and publishes it.
-        fn update() {
-            $name::build(0, $hdma::LINES as u8);
-            $name::publish();
-        }
-
-        /// Shows the frame `update` finished. Always writes HDMAEN.
-        fn nmi() {
-            let _flipped, _k = $hdma::commit();
-        }
-
-        /// The floor point (x, y) on screen, and the size of one texel
-        /// there (8.8 pixels). sy is `M7K_HIDDEN` for a point behind the
-        /// camera, past the horizon or below the band. Its depth, for
-        /// sorting, is left for `depth()`. After the build in the same
-        /// frame.
-        fn to_screen(x: M7Coord, y: M7Coord) -> i16, i16, u16 {
-            m7k_scan_to_screen!($state, $hstate, x, y);
-        }
-
-        /// The floor point under screen pixel (sx, sy). The `bool` is false
-        /// above the horizon, below the band, more than 128 pixels from the
-        /// center column, or off the map under a repeat mode that doesn't
-        /// wrap. After the build in the same frame.
-        fn to_world(sx: i16, sy: i16) -> bool, M7Coord, M7Coord {
-            let cx: u16 = $state.cx;
-            let cy: u16 = $state.cy;
-            if sy < $state.sky as i16 || sy >= ($state.sky as u16 + $state.ground as u16) as i16 {
-                return false, M7Coord(cx << 6), M7Coord(cy << 6);
-            }
-            let mut x: i16 = sx;
-            if $hstate.sel & 0x01 != 0 { x = 255 - x; }
-            let l: u8 = (sy as u8) - $state.sky;
-            let z: u8 = $state.line_z[l as u16];
-            // pixels × z/64 texels per pixel, in 10.6: pixels × z
-            let xn, xm = m7k_abs(x - 128);
-            if xm > 128 {
-                return false, M7Coord(cx << 6), M7Coord(cy << 6);
-            }
-            let mut rm: u16 = mul8(xm as u8, z);
-            if $state.lat != 0x100 { rm = m7k_stretch(rm, $state.lat); }
-            let mut r: i16 = rm as i16;
-            if xn { r = 0 - r; }
-            let f: i16 = mul8($state.foot - l, z) as i16;
-            let s: i16 = $state.sin;
-            let c: i16 = $state.cos;
-            let dx: i16 = m7k_smul_shr8(r, c) - m7k_smul_shr8(f, s);
-            let dy: i16 = 0 - m7k_smul_shr8(r, s) - m7k_smul_shr8(f, c);
-            let wraps: bool = $name::repeat().wraps();
-            let on: bool = m7k_on_map(wraps, cx, dx) && m7k_on_map(wraps, cy, dy);
-            return on, M7Coord((cx << 6) + dx as u16), M7Coord((cy << 6) + dy as u16);
-        }
-
-        fn sel() -> u8 {
-            return $hdma::sel();
-        }
-
-        fn set_sel(sel: u8) {
-            $hdma::set_sel(sel);
-        }
-    }
-
     impl $name {
-        /// Leaves the floor: the transport's stop, which turns its
-        /// channels off at once. In vblank, straight after `wait_nmi!()`.
-        fn stop() {
-            $hdma::stop();
-        }
-
-        /// The depth of the last `to_screen` point, in texels.
-        fn depth() -> i16 {
-            return $state.depth;
-        }
-
-        // -- tables -------------------------------------------------------
-
         /// The per-line depth tables for floor height `h` (0..127), down
         /// from the horizon to the foot (the most lines a full look down shows):
         /// z(l), and the distance z(l)·(foot - l)/64 straight ahead on
@@ -392,92 +295,47 @@ macro_rules! m7k_plain($name:ident, $state:ident, $hdma:ident, $hstate:ident, $r
         }
     }
 
-    impl Mode7Scan for $name {
-        /// The last build's horizon, a screen line: its rows start there.
-        fn begin() -> u8 {
-            return $state.sky;
-        }
-
-        /// The bottom of the last build's band.
-        fn end() -> u8 {
-            return $state.sky + $state.ground;
-        }
-
-        /// The ground lines: one row a line, from row `top`.
-        fn segment(p: u16) -> u16 {
-            return $hdma::seg_rows(p, $state.top, $state.ground);
-        }
-
-        /// The last build's center (M7X, M7Y), in texels.
-        fn center() -> u16, u16 {
-            return $state.cx, $state.cy;
-        }
-
-        /// The last build's BG1 scroll (M7HOFS, M7VOFS).
-        fn scroll() -> u16, u16 {
-            return $state.hofs, $state.vofs;
-        }
-
-        /// Builds the band of `lines` lines from screen line `top` into the
-        /// transport's back buffer, without publishing: the horizon (its
-        /// sky, clamped to the band), the ground rows (rows `top`...), the
-        /// center and the scroll. A shorter band shows the top of the
-        /// full-screen floor, cropped. Rows the buffer already holds for
-        /// the same heading, scales and height are kept.
-        fn build(top: u8, lines: u8) {
-            let cam: *M7Camera = $state.camera;
-            if cam as u16 == 0 { return; }  // not set up: no camera to follow
-            // the floor height and the stretch divide, so only on a change
-            let sx: u8 = cam.scale_x;
-            let mut sy: u8 = cam.scale_y;
-            if sy == 0 { sy = 1; }
-            let ch: u8 = cam.height;
-            let fresh: bool = $state.built_sy == 0;
-            let new_sy: bool = fresh || sy != $state.built_sy;
-            if new_sy || ch != $state.built_h {
-                let nh: u8 = m7k_row_height(ch, sy);
-                if fresh || nh != $state.row {
-                    $name::rebuild_lines(nh);
-                }
+    // The shared impls (`core.r65`), with the floor's build: the band of
+    // `lines` lines from screen line `top`, without publishing. The
+    // horizon is the floor height's, shifted by the pitch and clamped to
+    // the band; a shorter band shows the top of the full-screen floor,
+    // cropped. Rows the buffer already holds for the same heading, scales
+    // and height are kept. Its segment is one row a line, from row `top`;
+    // its forward offset is the foot's distance in 10.6.
+    m7k_scan_view!($name, $state, $hdma, $hstate, {
+        let cam: *M7Camera = $state.camera;
+        if cam as u16 == 0 { return; }  // not set up: no camera to follow
+        m7k_scan_camera!($state, cam);
+        // the floor height divides, so only on a change
+        if m7k_new_h {
+            let nh: u8 = m7k_row_height(m7k_ch, m7k_sy);
+            if m7k_fresh || nh != $state.row {
+                $name::rebuild_lines(nh);
             }
-            if new_sy || sx != $state.built_sx {
-                m7k_scan_stretch!($state, sx, sy);
-            }
-            $state.built_sx = sx;
-            $state.built_sy = sy;
-            $state.built_h = ch;
-            let h: u8 = $state.row;
-            // the pitch, in scanlines, moves the floor's picture: only the
-            // split and the pivot
-            let mut tilt: i8 = cam.pitch;
-            if tilt < 0 - M7K_PITCH_DOWN { tilt = 0 - M7K_PITCH_DOWN; }
-            if tilt > M7K_PITCH_UP { tilt = M7K_PITCH_UP; }
-            let mut sky: u8 = (M7K_ROW_SKY[h as u16] as i16 + tilt as i16) as u8;
-            if sky > lines { sky = lines; }
-            let horizon: u8 = top + sky;
-            $state.top = top;
-            $state.sky = horizon;
-            $state.ground = lines - sky;
-
-            // the pivot: the point under the camera, `foot` below the horizon
-            $state.pivot = horizon as u16 + $state.foot as u16;
-            m7k_scan_build_rows!($state, $hdma, $hstate, $rows, cam, top, $state.ground);
         }
+        let h: u8 = $state.row;
+        // the pitch, in scanlines, moves the floor's picture: only the
+        // split and the pivot
+        let mut tilt: i8 = cam.pitch;
+        if tilt < 0 - M7K_PITCH_DOWN { tilt = 0 - M7K_PITCH_DOWN; }
+        if tilt > M7K_PITCH_UP { tilt = M7K_PITCH_UP; }
+        let mut sky: u8 = (M7K_ROW_SKY[h as u16] as i16 + tilt as i16) as u8;
+        if sky > lines { sky = lines; }
+        let horizon: u8 = top + sky;
+        $state.top = top;
+        $state.sky = horizon;
+        $state.ground = lines - sky;
 
-        /// Publishes the last full-screen build: the lines above the
-        /// horizon hold the transport's top matrix, the ground its rows.
-        /// Tables the buffer already holds for the same split are kept.
-        fn publish() {
-            m7k_scan_publish!($name, $state, $hdma);
-        }
-
-        /// The transport's `commit()`, for an NMI handler that shows add-ons
-        /// with the frame.
-        fn commit() -> bool, u8 {
-            let flipped, k = $hdma::commit();
-            return flipped, k;
-        }
-    }
+        // the pivot: the point under the camera, `foot` below the horizon
+        $state.pivot = horizon as u16 + $state.foot as u16;
+        m7k_scan_build_rows!($state, $hdma, $hstate, $rows, cam, top, $state.ground);
+    }, {
+        return $hdma::seg_rows(p, $state.top, $state.ground);
+    }, {
+        let f: i16 = mul8($state.foot - l as u8, z) as i16;
+        m7k_fs = m7k_smul_shr8(f, s);
+        m7k_fc = m7k_smul_shr8(f, c);
+    });
 }
 
 // The default floor: over `M7HDMA`, on the multiplier.

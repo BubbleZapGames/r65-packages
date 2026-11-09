@@ -174,7 +174,7 @@ def flyer(snes):
 
 def test_lookup_tables(flyer):
     s = flyer
-    assert words(s.raw("__M7K_SINCOS_data").bytes()) == SINCOS
+    assert words(s.raw("__M7K_SIN_data").bytes()) == SINCOS[:65]   # a quarter wave
     assert words(s.raw("__M7K_RECIP_data").bytes(), signed=False) == RECIP
     assert list(s.raw("__M7K_ZRECIP_data").bytes()) == ZRECIP
     assert list(s.raw("__M7K_ROW_SKY_data").bytes()) == [sky_of(h) for h in range(128)]

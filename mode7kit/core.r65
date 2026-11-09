@@ -13,7 +13,7 @@
 //! - the M7SEL enums, the world coordinate `M7Coord` and its helpers;
 //! - the camera type, `M7Camera`. The game declares its cameras and hands
 //!   one to each view's `setup`;
-//! - the tables: sin/cos (640 B), the zoom reciprocal (512 B) and the
+//! - the tables: sin (130 B), the zoom reciprocal (512 B) and the
 //!   per-line views' depth scale (2321 B), each dropped when unused;
 //! - two stateless register writers, the DMA channel array, the
 //!   fixed-point multiplies and the VRAM upload macros.
@@ -152,36 +152,57 @@ fn m7k_tile_index(x: M7Coord, y: M7Coord) -> u16 {
 // SIN AND COS
 // ============================================================================
 
-// Angles are `u8`, 256 steps per turn. `M7K_SINCOS` is 640 bytes of ROM,
-// dropped from a program that never turns.
+// Angles are `u8`, 256 steps per turn. `M7K_SIN` is a quarter wave, 130
+// bytes of ROM, dropped from a program that never turns; the other three
+// quarters are its mirror and its negation.
 
-const fn m7k_build_sincos() -> [i16; 320] {
-    let mut t: [i16; 320] = [0; 320];
-    for i in 0..320 {
+const fn m7k_build_sin() -> [i16; 65] {
+    let mut t: [i16; 65] = [0; 65];
+    for i in 0..65 {
         t[i] = fixed_sin(i as u16, 256, 256);
     }
     return t;
 }
 
-/// sin(2π·i/256)·256 for i in 0..320: `sin(a) = T[a]`, `cos(a) = T[a + 64]`.
-static M7K_SINCOS: [i16; 320] = m7k_build_sincos();
+/// sin(2π·i/256)·256 for i in 0..64, a quarter turn.
+static M7K_SIN: [i16; 65] = m7k_build_sin();
+
+/// sin(angle) and cos(angle), 8.8 signed, in one fold of the quarter
+/// wave: cos(a) is sin(a + 64), the same index mirrored.
+fn m7k_sincos(angle: u8) -> i16, i16 {
+    let i: u8 = angle & 0x3F;
+    let mut si: u8 = i;
+    let mut ci: u8 = 64 - i;
+    if angle & 0x40 != 0 {
+        si = ci;
+        ci = i;
+    }
+    let mut s: i16 = M7K_SIN[si as u16];
+    let mut c: i16 = M7K_SIN[ci as u16];
+    if angle & 0x80 != 0 { s = 0 - s; }
+    if (angle + 0x40) & 0x80 != 0 { c = 0 - c; }
+    return s, c;
+}
 
 /// sin(angle), 8.8 signed.
 fn m7k_sin(angle: u8) -> i16 {
-    return M7K_SINCOS[angle as u16];
+    let s, _c = m7k_sincos(angle);
+    return s;
 }
 
 /// cos(angle), 8.8 signed.
 fn m7k_cos(angle: u8) -> i16 {
-    return M7K_SINCOS[angle as u16 + 64];
+    let _s, c = m7k_sincos(angle);
+    return c;
 }
 
 /// One step forward along `angle`, as a 10.6 world delta: `speed` is in
 /// 1/64 texel, so 64 moves one texel. Forward is -Y at angle 0, the way the
 /// rotation matrix turns the view.
 fn m7k_heading(angle: u8, speed: u8) -> i16, i16 {
-    let dx: i16 = m7k_smul_q8(0 - m7k_sin(angle), speed as u16);
-    let dy: i16 = m7k_smul_q8(0 - m7k_cos(angle), speed as u16);
+    let s, c = m7k_sincos(angle);
+    let dx: i16 = m7k_smul_q8(0 - s, speed as u16);
+    let dy: i16 = m7k_smul_q8(0 - c, speed as u16);
     return dx, dy;
 }
 
@@ -571,7 +592,7 @@ macro_rules! m7k_scan_to_screen($state:ident, $hstate:ident, $x:expr, $y:expr) {
     }
     // pixels per texel across: the line's, stretched by the scales' ratio
     let mut m7k_size: u16 = m7k_recip($state.line_z[m7k_lo] as u8);
-    if $state.lat_px != 0x100 { m7k_size = m7k_stretch(m7k_size, $state.lat_px); }
+    if $state.lat_px != 0x100 { m7k_size = m7k_mul_q8($state.lat_px, m7k_size); }
     let m7k_rn, m7k_rm = m7k_abs(m7k_r);
     let m7k_olo, m7k_ohi = mul16_wide(m7k_rm, m7k_size);
     let mut m7k_off: i16 = ((m7k_ohi << 8) | (m7k_olo >> 8)) as i16;
@@ -587,8 +608,7 @@ macro_rules! m7k_scan_to_screen($state:ident, $hstate:ident, $x:expr, $y:expr) {
 /// there; then the center on camera `$cam` and the scroll.
 macro_rules! m7k_scan_build_rows($state:ident, $hdma:ident, $hstate:ident, $rows:ident, $cam:ident, $top:ident, $n:expr) {
     let m7k_angle: u8 = $cam.heading;
-    let m7k_s: i16 = m7k_sin(m7k_angle);
-    let m7k_c: i16 = m7k_cos(m7k_angle);
+    let m7k_s, m7k_c = m7k_sincos(m7k_angle);
     $state.sin = m7k_s;
     $state.cos = m7k_c;
     let m7k_kb: u16 = $hdma::back_index() as u16;
@@ -626,6 +646,176 @@ macro_rules! m7k_scan_stretch($state:ident, $sx:expr, $sy:expr) {
         $state.lat = m7k_q;
         $state.lat_px = m7k_p;
         $state.gen = $state.gen + 1;
+    }
+}
+
+/// The start of a scan view's build: the camera `$cam`'s scales and height
+/// against the ones the view last read, and the stretch when a scale
+/// changed. It leaves `m7k_sy` (`scale_y`, at least 1) and `m7k_ch` (the
+/// height) for the view's own altitude, `m7k_new_h` set when either
+/// changed, and `m7k_fresh` before the first build since `setup`.
+macro_rules! m7k_scan_camera($state:ident, $cam:ident) {
+    let m7k_sx: u8 = $cam.scale_x;
+    let mut m7k_sy: u8 = $cam.scale_y;
+    if m7k_sy == 0 { m7k_sy = 1; }
+    let m7k_ch: u8 = $cam.height;
+    let m7k_fresh: bool = $state.built_sy == 0;
+    let m7k_new_sy: bool = m7k_fresh || m7k_sy != $state.built_sy;
+    let m7k_new_h: bool = m7k_new_sy || m7k_ch != $state.built_h;
+    // the stretch divides, so only on a change
+    if m7k_new_sy || m7k_sx != $state.built_sx {
+        m7k_scan_stretch!($state, m7k_sx, m7k_sy);
+    }
+    $state.built_sx = m7k_sx;
+    $state.built_sy = m7k_sy;
+    $state.built_h = m7k_ch;
+}
+
+/// The `Mode7` and `Mode7Scan` impls every scan view shares, and its `stop`
+/// and `depth`, for view `$name` (state `$state`) on transport `$hdma`
+/// (state `$hstate`). The view gives the bodies that differ: `$build`,
+/// `build(top, lines)`'s; `$segment`, `segment(p)`'s; and `$forward`, a
+/// block that sets `m7k_fs` and `m7k_fc` to `to_world`'s forward offset on
+/// ground line `l` (depth scale `z`) times the heading's `s` and `c`, in
+/// 10.6.
+macro_rules! m7k_scan_view($name:ident, $state:ident, $hdma:ident, $hstate:ident, $build:tt, $segment:tt, $forward:tt) {
+    impl Mode7 for $name {
+        /// The transport's setup (BGMODE 7, M7SEL and the matrix
+        /// channels), following camera `cam`.
+        fn setup(cam: *M7Camera, repeat: M7Repeat, flip: M7Flip) {
+            $state.camera = cam;
+            $hdma::setup(repeat, flip);
+            $state.built_sy = 0;
+            $state.key_gen[0] = 0xFF;
+            $state.key_gen[1] = 0xFF;
+            $state.key_sky[0] = 0xFF;
+            $state.key_sky[1] = 0xFF;
+        }
+
+        fn set_camera(cam: *M7Camera) {
+            $state.camera = cam;
+        }
+
+        fn camera() -> *M7Camera {
+            return $state.camera;
+        }
+
+        /// Builds the view over the whole transport from the camera (its
+        /// position, heading, scales, height and pitch), and publishes it.
+        fn update() {
+            $name::build(0, $hdma::LINES as u8);
+            $name::publish();
+        }
+
+        /// Shows the frame `update` finished. Always writes HDMAEN.
+        fn nmi() {
+            let _flipped, _k = $hdma::commit();
+        }
+
+        /// The ground point (x, y) on screen, and the size of one texel
+        /// there (8.8 pixels). sy is `M7K_HIDDEN` for a point that can't be
+        /// drawn: behind the camera, past the horizon or the far clip, or
+        /// below the band. Its depth, for sorting, is left for `depth()`.
+        /// After the build in the same frame.
+        fn to_screen(x: M7Coord, y: M7Coord) -> i16, i16, u16 {
+            m7k_scan_to_screen!($state, $hstate, x, y);
+        }
+
+        /// The ground point under screen pixel (sx, sy). The `bool` is
+        /// false above the horizon, below the band, more than 128 pixels
+        /// from the center column, or off the map under a repeat mode that
+        /// doesn't wrap. After the build in the same frame.
+        fn to_world(sx: i16, sy: i16) -> bool, M7Coord, M7Coord {
+            let cx: u16 = $state.cx;
+            let cy: u16 = $state.cy;
+            if sy < $state.sky as i16 || sy >= ($state.sky as u16 + $state.ground as u16) as i16 {
+                return false, M7Coord(cx << 6), M7Coord(cy << 6);
+            }
+            let mut x: i16 = sx;
+            if $hstate.sel & 0x01 != 0 { x = 255 - x; }
+            let l: u16 = ((sy as u8) - $state.sky) as u16;
+            let z: u8 = $state.line_z[l];
+            // pixels × z/64 texels per pixel, in 10.6: pixels × z
+            let xn, xm = m7k_abs(x - 128);
+            if xm > 128 {
+                return false, M7Coord(cx << 6), M7Coord(cy << 6);
+            }
+            let mut rm: u16 = mul8(xm as u8, z);
+            if $state.lat != 0x100 { rm = m7k_mul_q8($state.lat, rm); }
+            let mut r: i16 = rm as i16;
+            if xn { r = 0 - r; }
+            let s: i16 = $state.sin;
+            let c: i16 = $state.cos;
+            let mut m7k_fs: i16 = 0;
+            let mut m7k_fc: i16 = 0;
+            $forward
+            let dx: i16 = m7k_smul_shr8(r, c) - m7k_fs;
+            let dy: i16 = 0 - m7k_smul_shr8(r, s) - m7k_fc;
+            let wraps: bool = $name::repeat().wraps();
+            let on: bool = m7k_on_map(wraps, cx, dx) && m7k_on_map(wraps, cy, dy);
+            return on, M7Coord((cx << 6) + dx as u16), M7Coord((cy << 6) + dy as u16);
+        }
+
+        fn sel() -> u8 {
+            return $hdma::sel();
+        }
+
+        fn set_sel(sel: u8) {
+            $hdma::set_sel(sel);
+        }
+    }
+
+    impl Mode7Scan for $name {
+        /// The last build's horizon, a screen line: its rows start there.
+        fn begin() -> u8 {
+            return $state.sky;
+        }
+
+        /// The bottom of the last build's band.
+        fn end() -> u8 {
+            return $state.sky + $state.ground;
+        }
+
+        fn segment(p: u16) -> u16 $segment
+
+        /// The last build's center (M7X, M7Y), in texels.
+        fn center() -> u16, u16 {
+            return $state.cx, $state.cy;
+        }
+
+        /// The last build's BG1 scroll (M7HOFS, M7VOFS).
+        fn scroll() -> u16, u16 {
+            return $state.hofs, $state.vofs;
+        }
+
+        fn build(top: u8, lines: u8) $build
+
+        /// Publishes the last full-screen build: the lines above the
+        /// horizon hold the transport's top matrix, the ground its rows.
+        /// Tables the buffer already holds for the same layout are kept.
+        fn publish() {
+            m7k_scan_publish!($name, $state, $hdma);
+        }
+
+        /// The transport's `commit()`, for an NMI handler that shows add-ons
+        /// with the frame.
+        fn commit() -> bool, u8 {
+            let flipped, k = $hdma::commit();
+            return flipped, k;
+        }
+    }
+
+    impl $name {
+        /// Leaves the view: the transport's stop, which turns its channels
+        /// off at once. In vblank, straight after `wait_nmi!()`.
+        fn stop() {
+            $hdma::stop();
+        }
+
+        /// The depth of the last `to_screen` point, in texels.
+        fn depth() -> i16 {
+            return $state.depth;
+        }
     }
 }
 
@@ -786,27 +976,25 @@ fn m7k_abs(v: i16) -> bool, u16 {
     return false, v as u16;
 }
 
-/// (m · k) >> 8 for m ≤ 256 and any u16 k, saturating at 0x7FFF. Two 8×8
-/// hardware multiplies: the high byte of k times m, plus the carry from
-/// its low byte.
+/// (m · k) >> 8 for an 8.8 factor m ≤ 2.0 (512) and any u16 k, exact,
+/// saturating at 0x7FFF: a sin or cos times a factor, or a lateral stretch
+/// applied to a factor, a size or an offset. m's fraction is two 8×8
+/// hardware multiplies (k's high byte, plus the carry from its low byte);
+/// its whole part adds k once or twice.
 fn m7k_mul_q8(m: u16, k: u16) -> u16 {
-    if m >= 256 {
-        if k > 0x7FFF { return 0x7FFF; }
-        return k;
+    let f: u8 = m as u8;
+    let mut r: u16 = 0;
+    if f != 0 {
+        r = mul8(f, (k >> 8) as u8) + (mul8(f, k as u8) >> 8);
     }
-    let lo: u16 = mul8(m as u8, k as u8) >> 8;
-    let hi: u16 = mul8(m as u8, (k >> 8) as u8);
-    let r: u16 = hi + lo;
+    let mut w: u8 = (m >> 8) as u8;
+    while w > 0 {
+        if r > 0x7FFF || k > 0x7FFF - r { return 0x7FFF; }
+        r = r + k;
+        w--;
+    }
     if r > 0x7FFF { return 0x7FFF; }
     return r;
-}
-
-/// (v · q) >> 8 for any u16 v and q, saturating at 0x7FFF: a lateral
-/// stretch (8.8, up to 2.0) applied to a factor, a size or an offset.
-fn m7k_stretch(v: u16, q: u16) -> u16 {
-    let lo, hi = mul16_wide(v, q);
-    if hi >= 0x80 { return 0x7FFF; }
-    return (hi << 8) | (lo >> 8);
 }
 
 /// A perspective view's lateral stretch for scales `sx`, `sy`: texels per
@@ -842,25 +1030,32 @@ fn m7k_smul_q8(m: i16, k: u16) -> i16 {
 #[hw(0x4203)]
 static mut M7K_WRMPYB: u16;
 
-/// `$out` = (t · d) >> 14 for magnitudes t ≤ 256 (8.8) and d (u16): two
-/// 8×8 products, the second reusing WRMPYA.
-macro_rules! m7k_tprod($t:expr, $d:expr, $out:ident) {
+/// `$ox` = (t · x) >> 14 and `$oy` = (t · y) >> 14 for magnitudes t ≤ 256
+/// (8.8) and x, y (u16): four 8×8 products from one WRMPYA, t.
+macro_rules! m7k_tprod2($t:expr, $x:expr, $y:expr, $ox:ident, $oy:ident) {
     if $t < 256 {
-        WRMPY = $t | ($d << 8);
+        WRMPY = $t | ($x << 8);
         NOP(4);
-        let m7k_lo: u16 = RDMPY;
-        M7K_WRMPYB = $d >> 8;
+        let m7k_xl: u16 = RDMPY;
+        M7K_WRMPYB = $x >> 8;
         NOP(4);
-        $out = (RDMPY + (m7k_lo >> 8)) >> 6;
+        $ox = (RDMPY + (m7k_xl >> 8)) >> 6;
+        M7K_WRMPYB = $y;
+        NOP(4);
+        let m7k_yl: u16 = RDMPY;
+        M7K_WRMPYB = $y >> 8;
+        NOP(4);
+        $oy = (RDMPY + (m7k_yl >> 8)) >> 6;
     } else {
-        $out = $d >> 6;
+        $ox = $x >> 6;
+        $oy = $y >> 6;
     }
 }
 
 /// A 10.6 offset (dx, dy) turned into view space by a heading's sin and
 /// cos (8.8), in whole texels: forward = -(s·dx + c·dy) >> 14 and right =
 /// (c·dx - s·dy) >> 14, each product's magnitude truncated, then signed.
-/// Eight hardware multiplies, no calls.
+/// Eight hardware multiplies, two loads of WRMPYA, no calls.
 fn m7k_rotate14(s: i16, c: i16, dx: i16, dy: i16) -> i16, i16 {
     let sn, sm = m7k_abs(s);
     let cn, cm = m7k_abs(c);
@@ -870,10 +1065,8 @@ fn m7k_rotate14(s: i16, c: i16, dx: i16, dy: i16) -> i16, i16 {
     let mut sy: u16 = 0;
     let mut cx: u16 = 0;
     let mut cy: u16 = 0;
-    m7k_tprod!(sm, xm, sx);
-    m7k_tprod!(sm, ym, sy);
-    m7k_tprod!(cm, xm, cx);
-    m7k_tprod!(cm, ym, cy);
+    m7k_tprod2!(sm, xm, ym, sx, sy);
+    m7k_tprod2!(cm, xm, ym, cx, cy);
     let mut psx: i16 = sx as i16;
     if sn != xn { psx = 0 - psx; }
     let mut psy: i16 = sy as i16;

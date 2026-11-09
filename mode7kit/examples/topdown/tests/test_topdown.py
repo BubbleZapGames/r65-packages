@@ -84,7 +84,7 @@ def top(snes):
 
 def test_lookup_tables(top):
     s = top
-    assert words(s.raw("__M7K_SINCOS_data").bytes()) == SINCOS
+    assert words(s.raw("__M7K_SIN_data").bytes()) == SINCOS[:65]   # a quarter wave
     assert words(s.raw("__M7K_RECIP_data").bytes(), signed=False) == RECIP
 
 

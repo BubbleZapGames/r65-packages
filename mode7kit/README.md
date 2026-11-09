@@ -52,11 +52,11 @@ Tables build at compile time.
 
 | File | Gives you | ROM tables | RAM |
 |---|---|---|---|
-| `static.r65` | `M7Static` | sin/cos, reciprocal (1.2 KB) | 31 B, + your camera |
+| `static.r65` | `M7Static` | sin, reciprocal (0.6 KB) | 31 B, + your camera |
 | `plain.r65` | `M7Plain`, the perspective floor (a `Mode7Scan`) | + depth scale (2.3 KB) and per-height tables (640 B) | + 0.7 KB |
 | `plain_rotation.r65` | `M7PlainRotation`, the plain at a true pitch (a `Mode7Scan`) | + depth scale (2.3 KB) | + 0.7 KB |
 | `hdma.r65` | the transport macro `m7k_hdma!` and `M7HDMA`, the per-line views' transport, for your own effects, HDMA channels 2–3 | none | + 3.7 KB (16 B a line) |
-| `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Camera` and the world-coordinate helpers, the sin/cos and zoom reciprocal tables, the M7SEL enums, VRAM upload macros | sin/cos (640 B), reciprocal (512 B) | none (9 B for each camera you declare) |
+| `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Camera` and the world-coordinate helpers, the sin and zoom reciprocal tables, the M7SEL enums, VRAM upload macros | sin (130 B), reciprocal (512 B) | none (9 B for each camera you declare) |
 
 ## Quick start
 
@@ -299,10 +299,10 @@ the bench's own copy of the flyer's sky bands):
 | floor + sky, turning, stretched (56, 64) | 238 |
 | a height change (the line tables) | + 158 |
 | `to_screen` on the floor: visible / behind / far | 13 / 8 / 4 |
-| `M7Static::update` | 10 |
-| `M7PlainRotation` turning at 22.5° / 45° / straight down | 183 / 277 / 11 |
-| `M7PlainRotation` turning at 22.5°, stretched (56, 64) | 187 |
-| `M7PlainRotation` pitch change (tables and rows) | 397 |
+| `M7Static::update` | 11 |
+| `M7PlainRotation` turning at 22.5° / 45° / straight down | 184 / 278 / 12 |
+| `M7PlainRotation` turning at 22.5°, stretched (56, 64) | 188 |
+| `M7PlainRotation` pitch change (tables and rows) | 399 |
 
 The flyer example, with five objects projected, runs at 60 fps while
 turning; a frame that changes the height drops to 30, and so does a

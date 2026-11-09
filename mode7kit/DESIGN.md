@@ -48,7 +48,7 @@ core.r65 ◄─┬─ static.r65                         M7Static
 
 | Layer | File | Writes | Default instance | `Mode7`? | ROM | RAM |
 |---|---|---|---|---|---|---|
-| core | `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Repeat`, `M7Flip`, `m7k_sin/cos`, `m7k_heading`, `m7k_recip`, `M7Camera`, register writers, the DMA channel array, the multiplies, uploads | none: the game declares its cameras | | 640 B (sin/cos), 512 B (reciprocal), 2321 B (`M7K_ZRECIP`, for a per-line view) | none (7 B a game camera) |
+| core | `core.r65` | the `Mode7` and `Mode7Scan` traits, `M7Coord`, `M7Repeat`, `M7Flip`, `m7k_sin/cos`, `m7k_heading`, `m7k_recip`, `M7Camera`, register writers, the DMA channel array, the multiplies, uploads | none: the game declares its cameras | | 130 B (sin), 512 B (reciprocal), 2321 B (`M7K_ZRECIP`, for a per-line view) | none (7 B a game camera) |
 | flat view | `static.r65` | `M7Static` | `M7K_STATIC` | yes | code | 31 B |
 | transport | `hdma.r65` | `m7k_hdma!`: per-line matrices, double buffer, indirect tables, M7SEL and the view, HDMAEN; the HDMA table writers | `M7HDMA` (224 lines, ch 2–3) | no | code | 16·lines + 151 B an instance (3735 B for `M7HDMA`) |
 | floor | `plain.r65` | `m7k_plain!`: a camera's perspective floor in a transport, its projections | `M7Plain` | yes, and `Mode7Scan` | 640 B | 723 B |
@@ -68,7 +68,10 @@ drives it directly. A `Mode7` is what a game builds with `update()` and
 projects with: `M7Static` or a floor.
 
 Each instance keeps its state in one static with a static initializer, so
-the first NMI after power-on commits sane values with no `init()`. This is
+the first NMI after power-on commits sane values with no `init()`. The
+state is mostly zeros (the transport's rows, the line tables), and R65
+fills a long zero run at start-up instead of copying it from ROM, so an
+initializer costs ROM only for its other bytes (21 B for `M7HDMA`'s 3735). This is
 the nscene `SCENE_CONTROLLER` pattern: a library owns its state, and state
 that nothing reads is dropped.
 
@@ -131,7 +134,7 @@ m7k_plain_rotation!(M7PlainRotation, M7K_PLAIN_ROTATION, M7HDMA, M7K_HDMA,
 the camera (below), two stateless register writers, the DMA channel array
 (see [Instance macros](#instance-macros)), the fixed-point multiplies and
 the upload macros. It declares no state: the game declares its cameras.
-Its tables are the sin/cos table, which the camera's movement and every
+Its tables are the sin table, which the camera's movement and every
 view's matrix read, and the zoom reciprocal (both below).
 
 ```rust
@@ -251,8 +254,9 @@ WRMPYA already loaded.
 | Helper | Computes |
 |---|---|
 | `m7k_abs(v: i16) -> bool, u16` | sign and magnitude |
-| `m7k_mul_q8` / `m7k_smul_q8(m, k)` | (m · k) >> 8 for \|m\| ≤ 256: two multiplies |
-| `m7k_rotate14(s, c, dx, dy) -> i16, i16` | A 10.6 offset turned into view space, (forward, right) in texels: eight multiplies inline (`m7k_tprod!`), each product's magnitude >> 14, then signed |
+| `m7k_mul_q8(m, k)` | (m · k) >> 8, exact, for an 8.8 factor m ≤ 2.0, saturating: two multiplies for m's fraction, plus k once or twice for its whole part. Also the lateral stretch, of a row factor, a size or an offset |
+| `m7k_smul_q8(m, k)` | the same, signed m, \|m\| ≤ 256 |
+| `m7k_rotate14(s, c, dx, dy) -> i16, i16` | A 10.6 offset turned into view space, (forward, right) in texels: eight multiplies inline (`m7k_tprod2!`, four from each of sin and cos, loaded into WRMPYA once), each product's magnitude >> 14, then signed |
 | `m7k_smul_shr14`, `m7k_smul_shr8`, `m7k_smul_shr2` | general signed products, bits 14.., 8.., 2.., by sign and magnitude through stdlib's `mul16_wide` |
 
 The full 16×16 → 32 product is stdlib's `mul16_wide(a, b) -> lo, hi`, which
@@ -265,21 +269,25 @@ byte. mode7kit has no multiply of its own beside it.
 `core.r65`'s first table:
 
 ```rust
-const fn build_sincos() -> [i16; 320] {
-    let mut t: [i16; 320] = [0; 320];
-    for i in 0..320 { t[i] = fixed_sin(i as u16, 256, 256); }
+const fn m7k_build_sin() -> [i16; 65] {
+    let mut t: [i16; 65] = [0; 65];
+    for i in 0..65 { t[i] = fixed_sin(i as u16, 256, 256); }
     return t;
 }
-static M7K_SINCOS: [i16; 320] = build_sincos();   // 640 B
+static M7K_SIN: [i16; 65] = m7k_build_sin();      // 130 B, a quarter turn
 ```
 
-`sin(a) = T[a]` and `cos(a) = T[a + 64]`. The extra 64 entries mean neither
-lookup needs a `& 0xFF` mask. `fixed_sin` is the builtin
-`round(sin(2π·i/256)·256)` (r65/compiler/builtins/registry.py:112).
+`fixed_sin` is the builtin `round(sin(2π·i/256)·256)`
+(r65/compiler/builtins/registry.py:112). It is exactly symmetric, so the
+other three quarters are the quarter's mirror (`64 - (a & 63)` when bit 6
+is set) and negation (bit 7): the same values as a full 320-entry table,
+in 130 B instead of 640, for a few cycles a lookup. A view reads it a few
+times a build.
 
 | Function | Does |
 |---|---|
-| `m7k_sin(a: u8) -> i16`, `m7k_cos(a: u8) -> i16` | Table reads |
+| `m7k_sincos(a: u8) -> i16, i16` | Both, from one fold of the quarter wave: mirrored and negated by `a`'s quadrant, `cos(a) = sin(a + 64)` |
+| `m7k_sin(a: u8) -> i16`, `m7k_cos(a: u8) -> i16` | One of them, through `m7k_sincos` |
 | `m7k_heading(angle: u8, speed: u8) -> i16, i16` | (−sin, −cos) × speed, as a 10.6 world delta: `speed` is in 1/64 texel, so 64 moves one texel forward. The plane's forward is −Y at angle 0, as in both demos. |
 
 `M7Static` uses the table for its matrix, the floor for its per-line
@@ -666,14 +674,24 @@ that implements both drops in by name.
 ### Shared scan-view code
 
 `M7Plain` and `M7PlainRotation` differ in their line tables, their rows'
-products, their sky and pivot, `to_world` (the floor's forward distance is
+products, their sky and pivot, `to_world`'s forward distance (the floor's is
 exact, from (foot − l)·z; `M7PlainRotation` reads its table) and `segment`. The
 rest is one body in `core.r65`, as macros each instance expands in its own
 functions, so the code stays the instance's, on absolute addresses, at no
-run-time cost (the bench didn't move):
+run-time cost (the bench didn't move).
+
+`m7k_scan_view!(Name, STATE, Hdma, HDMA_STATE, {build}, {segment},
+{forward})` writes everything else of a view: its `impl Mode7` and `impl
+Mode7Scan`, `stop` and `depth`. The three blocks are the parts that differ:
+`build(top, lines)`'s body, `segment(p)`'s, and `to_world`'s forward offset
+(`m7k_fs`, `m7k_fc`: the distance on line `l` times the heading's sin and
+cos, in 10.6). A block passes through as a function body, so a view's own
+code costs no call. The view's macro keeps only its state struct, its
+initializer and its `rebuild_lines`. The other macros:
 
 | Macro | Body of |
 |---|---|
+| `m7k_scan_camera!(STATE, cam)` | `build`'s start: the scales and height against the ones last read, the stretch on a scale change; leaves `m7k_sy`, `m7k_ch`, `m7k_new_h`, `m7k_fresh` for the view's altitude |
 | `m7k_scan_to_screen!(STATE, HDMA_STATE, x, y)` | `to_screen`: the cull by `reach`, `m7k_rotate14`, the signed search of `line_dist`, sx from `M7K_RECIP` |
 | `m7k_scan_build_rows!(STATE, Hdma, HDMA_STATE, rows, cam, top, n)` | `build` after the band and `pivot`: the heading, the keyed rows, the center and the scroll (vofs = cy − pivot) |
 | `m7k_scan_publish!(Name, STATE, Hdma)` | `publish`: the top matrix to the horizon, then `Name::segment`, unless the buffer's tables match |
@@ -1111,8 +1129,8 @@ and B = −C = z·sin ψ, a rotation scaled by the altitude, z = H/2, and stretc
 at height 128 it is `M7Static`'s matrix for the same scales, but for z's
 rounding and |cos| and |sin| halved. The build writes
 **one row** and `segment` lays it out with the transport's `seg_hold`:
-once entries pointing every line at that row. Turning costs 10 lines, like
-`M7Static`. The row is in the back buffer, double-buffered like any
+once entries pointing every line at that row. Turning costs 12 lines, about
+`M7Static`'s. The row is in the back buffer, double-buffered like any
 other. The transport's top matrix would have been simpler, but it is
 shared by both buffers, so a turn would change the frame on screen
 mid-picture.
@@ -1130,7 +1148,7 @@ half works too.
    widest stretch, 4z.
 3. Binary-search `line_dist` for sy, with signed compares.
 4. sx = 128 ± r·size >> 8, with size `M7K_RECIP[z]`, times p when the
-   scales differ (`m7k_stretch`, one multiply).
+   scales differ (`m7k_mul_q8`).
 
 `depth()` is the forward distance. `to_world` inverts it with
 `line_dist`. A horizontal flip is kept and a vertical one dropped, as on
@@ -1142,11 +1160,11 @@ Bench cases 18–22 and 24, at height 72, in scanlines:
 
 | Case | Lines |
 |---|---|
-| turning, pitch 16 (22.5°) | 183 |
-| turning, pitch 16, stretched (56, 64) | 187 |
-| turning, pitch 32 (45°) | 277 |
-| turning, straight down | 11 |
-| a pitch change at 16 (tables and rows) | 397 |
+| turning, pitch 16 (22.5°) | 184 |
+| turning, pitch 16, stretched (56, 64) | 188 |
+| turning, pitch 32 (45°) | 278 |
+| turning, straight down | 12 |
+| a pitch change at 16 (tables and rows) | 399 |
 | unchanged | 7 |
 
 - **Turning at 45° takes longer than a frame.** The 4-product row loop
@@ -1248,7 +1266,7 @@ flyer that turns runs at 30 fps.
   needed, it is measured first and justified in a comment beside it.
 - **No global registers.** That means no `Y = pos; T[Y] = v`, no
   `X = angle & 0xFF; COS[X]`, and no `A = v; REG = A as u8; REG = B`. Use
-  locals and indexing (`T[pos] = v`, `M7K_SINCOS[a as u16]`), and let the
+  locals and indexing (`T[pos] = v`, `M7K_SIN[i as u16]`), and let the
   compiler choose registers. A write-twice register is written as
   `REG = v as u8; REG = (v >> 8) as u8;`.
 - The hardware multiplier is driven through stdlib's `WRMPY` and `RDMPY`

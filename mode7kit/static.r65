@@ -185,8 +185,7 @@ impl M7Static {
     /// Rotates the view by `angle`: A = D = cos, B = sin, C = -sin, and the
     /// inverse (the transpose) to match. No multiply.
     fn rotate(angle: u8) {
-        let s: i16 = m7k_sin(angle);
-        let c: i16 = m7k_cos(angle);
+        let s, c = m7k_sincos(angle);
         M7K_STATIC.a = c;
         M7K_STATIC.b = s;
         M7K_STATIC.c = 0 - s;
@@ -219,8 +218,7 @@ impl M7Static {
     /// The inverse is diag(sx, sy)·Rᵀ. Equal zooms take the 2-multiply path.
     fn rotate_scale(angle: u8, zx: u8, zy: u8) {
         M7K_STATIC.zoom = zx;
-        let s: i16 = m7k_sin(angle);
-        let c: i16 = m7k_cos(angle);
+        let s, c = m7k_sincos(angle);
         let kx: u16 = m7k_recip(zx);
         let ca: i16 = m7k_smul_q8(c, kx);
         let sa: i16 = m7k_smul_q8(s, kx);
