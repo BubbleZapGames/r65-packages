@@ -34,7 +34,7 @@ Python.
 `src/bands.r65` and `src/horizon.r65` are this example's code, not
 mode7kit's. They build on its transport (the double buffer they follow and
 the HDMAEN shadow they join) and read the floor only through `Mode7Scan`:
-its rows' region `begin()..end()` and its `camera()`. The frame splits the
+its rows' region `band()` and its `camera()`. The frame splits the
 floor's `update()` around the sky's, so the sky's bands are ready with the
 frame they go with:
 
@@ -82,9 +82,9 @@ The tables are written in place with direct stores (`m7k_band_hold!`,
 `m7k_horizon!` writes the background of dizworld's view: a sky band in
 another BG mode above a floor, a haze under the horizon, and an optional
 HUD band under the floor. It is **not a `Mode7`**. It names its floor (any
-`Mode7Scan`) and reads the floor's last build, `begin()`, `end()` and
-`camera()`; its bands are the sky (the lines above `begin()`), the floor
-(Mode 7, `begin()..end()`) and the HUD. The game keeps the floor as its
+`Mode7Scan`) and reads the floor's last build, `band()` and `camera()`;
+its bands are the sky (the lines above the band), the floor (Mode 7, the
+band's lines) and the HUD. The game keeps the floor as its
 view: it sets the floor up, builds and publishes it, commits it in the
 NMI handler and projects through it.
 
@@ -103,7 +103,7 @@ M7Plain::publish();
 | `set_hud(lines, mode: BG, tm)` | A band of `lines` at the bottom (0: none); the floor builds `224 − lines`. Before `setup`. |
 | `setup()` | The bands: split at line 64, the floor, the HUD. After the floor's `setup`. |
 | `stop()` | The bands'. The floor stops on its own. |
-| `update()` | The sky and floor bands' lines at the floor's `begin()`/`end()`, `fill_back()`, and the back buffer's sky scroll. After the floor's `build`, before its `publish`. |
+| `update()` | The sky and floor bands' lines at the floor's `band()`, `fill_back()`, and the back buffer's sky scroll. After the floor's `build`, before its `publish`. |
 | `nmi()` | The bands' `show` of the front buffer. After the floor's `nmi()`. |
 | `sky_scroll() -> u16, u16` | dizworld's BG2 parallax for the frame on screen: hofs = −(angle·4) & 0x3FF, vofs = 240 − horizon. Read in the NMI handler, after `nmi()`. |
 

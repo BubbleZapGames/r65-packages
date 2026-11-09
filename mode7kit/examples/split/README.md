@@ -34,7 +34,7 @@ the floors' horizons, the bands' and the views' tables.
 `src/bands.r65` and `src/split.r65` are this example's code, not
 mode7kit's. They build on its transport (the double buffer and segments,
 the HDMAEN shadow) and on two floors through `Mode7Scan`: each built into
-its half with `build(top, lines)`, its region `begin()..end()` placing the
+its half with `build(top, lines)`, its region `band()` placing the
 half's sky band.
 
 ### `src/bands.r65`: per-line BG mode and layers

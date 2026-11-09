@@ -23,7 +23,7 @@ R65. The README is the user guide.
 - **Mode 7 only.** Per-line BG mode and layer bands, a sky over the
   horizon, a HUD band and a split screen are general HDMA, not Mode 7, so
   the package leaves them to the game. Their only tie to a floor is its
-  rows' region (`Mode7Scan::begin()..end()`). `examples/flyer/` and
+  rows' region (`Mode7Scan::band()`). `examples/flyer/` and
   `examples/split/` carry their own.
 - **Measured, not estimated.** `tests/bench/` latches the V-counter
   around each piece; the costs below are its numbers, and its budgets
@@ -647,7 +647,7 @@ static mut $state: $name = /* identity top, all zero, sel 0 */;
 
 `core.r65` also declares the trait a per-line view implements on top of
 `Mode7`. It knows nothing of skies or horizons: a build renders rows into
-a region of lines, `begin()..end()`, and the lines above it, down from the
+a region of lines, `band()`, and the lines above it, down from the
 build's `top`, show the transport's top matrix. That is all a game needs
 to put a band over the lines above one, or to stack two in a split,
 without knowing how it computes its rows.
@@ -656,20 +656,19 @@ without knowing how it computes its rows.
 trait Mode7Scan: Mode7 {
     fn build(top: u8, lines: u8);   // rows, center, scroll into the back buffer; no publish
     fn publish();                   // the last full-screen build as the next frame
-    fn commit() -> bool, u8;        // the transport's, for an NMI handler with add-ons
-    fn begin() -> u8;               // the first screen line the last build rendered rows into
-    fn end() -> u8;                 // one past its last: the region is begin()..end()
+    fn band() -> u8, u8;            // the region: its first screen line, and its line count
     fn segment(p: u16) -> u16;      // append that region's segments at cursor p
     fn center() -> u16, u16;        // its M7X, M7Y
     fn scroll() -> u16, u16;        // its M7HOFS, M7VOFS
 }
 ```
 
-`m7k_plain!` implements it: `begin()` is its horizon, `end()` the bottom
-of its band. The flyer's sky and the split example call only `Mode7` and
+`m7k_plain!` implements it: `band()` is its horizon and the lines from
+there to the bottom of its band. The flyer's sky and the split example call only `Mode7` and
 `Mode7Scan` methods on their floors, and read a sky's parallax from the
 floor's `camera()`, so another floor (a true pitch, a game's own effect)
-that implements both drops in by name.
+that implements both drops in by name. An NMI handler that shows add-ons
+with the frame calls the transport's `commit()` itself.
 
 ### Shared scan-view code
 
@@ -843,10 +842,9 @@ static mut $state: $name = /* no tables built */;
 | `sel()`, `set_sel()` | The transport's |
 | (the camera's scales, height and pitch) | Read by the build. The floor height (`m7k_row_height`, clamped to 0..127) and the stretch (`m7k_lateral`) divide, so the build computes them only when the scales or the height change, and rebuilds the tables only when the floor height does; the pitch is clamped to −32..64 |
 | `depth()` | The last projected point's depth |
-| `begin()`, `end()`, `center()`, `scroll()` | `Mode7Scan`: the last build's rows (horizon to band bottom) and view |
+| `band()`, `center()`, `scroll()` | `Mode7Scan`: the last build's rows (the horizon and the lines to the band's bottom) and view |
 | `build(top, lines)` | `Mode7Scan`: the band of `lines` lines from screen line `top`: its rows, from row `top`, and its view; no publishing |
 | `publish()` | `Mode7Scan`: a full-screen frame of the last build: the top matrix down to the horizon, then the rows |
-| `commit() -> bool, u8` | `Mode7Scan`: the transport's, for an NMI handler with add-ons |
 | `rebuild_lines(h)` | The line tables for floor height h (0..127); the build calls it when the height changes |
 
 **Bands.** `build(top, lines)` puts the horizon at `top + sky`, the sky
@@ -980,7 +978,7 @@ dizworld's foot with a floor that can only look up, was turned down.)
 
 `rebuild_lines` fills `foot` lines, as many as a full look down shows. The
 ramp then runs 32 lines past dizworld's near edge, which is why
-`M7K_ZRECIP` reaches index 2320. `begin()` follows the horizon, so a sky
+`M7K_ZRECIP` reaches index 2320. `band()` starts at the horizon, so a sky
 band set from it moves with the pitch.
 
 ### World projection

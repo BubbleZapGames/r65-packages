@@ -118,7 +118,7 @@ loop {
 
 For a sky above the horizon, split the floor's `update()` into
 `M7Plain::build(0, 224)` and `M7Plain::publish()`, and set your sky's
-lines from `M7Plain::begin()` between them, so they are ready with the
+lines from `M7Plain::band()` between them, so they are ready with the
 frame they go with. The flyer example does this.
 
 A true pitch is `M7PlainRotation` in place of `M7Plain`, with the same

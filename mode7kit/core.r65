@@ -502,7 +502,7 @@ trait Mode7 {
 /// A `Mode7` view built a scanline at a time into a transport: the floor
 /// (`m7k_plain!`), the true-pitch plain (`m7k_plain_rotation!`) or a
 /// game's own per-line effect. A build renders rows
-/// into a region of lines, `begin()..end()`; the lines above it, down from
+/// into a region of lines, `band()`; the lines above it, down from
 /// the build's `top`, show the transport's top matrix. A game stacks
 /// these by their regions through these methods alone: the flyer example
 /// puts a sky band over the lines above a floor's region, and the split
@@ -518,18 +518,11 @@ trait Mode7Scan: Mode7 {
     /// frame.
     fn publish();
 
-    /// The transport's `commit()`, for an NMI handler that shows add-ons
-    /// with the frame: whether it flipped, and the buffer now shown.
-    fn commit() -> bool, u8;
+    /// The last build's region: the first screen line it rendered rows
+    /// into, and how many lines (0 for none).
+    fn band() -> u8, u8;
 
-    /// The first screen line the last build rendered rows into.
-    fn begin() -> u8;
-
-    /// One past the last screen line the last build rendered rows into:
-    /// the region is `begin()..end()`, empty when they are equal.
-    fn end() -> u8;
-
-    /// Appends the last build's region, lines `begin()..end()`, to the back
+    /// Appends the last build's region (`band()`) to the back
     /// buffer's tables at cursor `p` (after the segments above it), and
     /// returns the next cursor. A game laying out several views in one
     /// frame calls it for each, instead of naming the rows itself.
@@ -766,14 +759,10 @@ macro_rules! m7k_scan_view($name:ident, $state:ident, $hdma:ident, $hstate:ident
     }
 
     impl Mode7Scan for $name {
-        /// The last build's horizon, a screen line: its rows start there.
-        fn begin() -> u8 {
-            return $state.sky;
-        }
-
-        /// The bottom of the last build's band.
-        fn end() -> u8 {
-            return $state.sky + $state.ground;
+        /// The last build's horizon, a screen line its rows start on, and
+        /// the lines from there to the bottom of its band.
+        fn band() -> u8, u8 {
+            return $state.sky, $state.ground;
         }
 
         fn segment(p: u16) -> u16 $segment
@@ -795,13 +784,6 @@ macro_rules! m7k_scan_view($name:ident, $state:ident, $hdma:ident, $hstate:ident
         /// Tables the buffer already holds for the same layout are kept.
         fn publish() {
             m7k_scan_publish!($name, $state, $hdma);
-        }
-
-        /// The transport's `commit()`, for an NMI handler that shows add-ons
-        /// with the frame.
-        fn commit() -> bool, u8 {
-            let flipped, k = $hdma::commit();
-            return flipped, k;
         }
     }
 

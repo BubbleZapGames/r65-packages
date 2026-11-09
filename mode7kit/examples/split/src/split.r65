@@ -239,12 +239,10 @@ macro_rules! m7k_split($name:ident, $state:ident, $hdma:ident, $bands:ident, $vi
             let half: u8 = $state.half;
             $fa::build(0, half);
             $fb::build(half, 224 - half);
-            let begin_a: u8 = $fa::begin();
-            let begin_b: u8 = $fb::begin();
+            let begin_a, ground_a = $fa::band();
+            let begin_b, _ground_b = $fb::band();
             let sky_a: u8 = begin_a;
-            let ground_a: u8 = $fa::end() - begin_a;
             let sky_b: u8 = begin_b - half;
-            let ground_b: u8 = $fb::end() - begin_b;
             let cam_a: *M7Camera = $fa::camera();
             let cam_b: *M7Camera = $fb::camera();
             $bands::set_lines(0, sky_a);

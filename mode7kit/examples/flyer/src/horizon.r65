@@ -7,7 +7,7 @@
 //! `m7k_plain!`'s), over bands (`m7k_bands!`): the sky, the floor and the
 //! HUD. It is not a `Mode7`: the
 //! game drives the floor, which is its view, and the background reads the
-//! floor's last build (`begin()`, `end()`, `camera()`) to put the sky
+//! floor's last build (`band()`, `camera()`) to put the sky
 //! above the horizon and turn the sky with the view.
 //!
 //! The bands must be ready before the floor publishes the frame they go
@@ -116,9 +116,9 @@ macro_rules! m7k_horizon($name:ident, $state:ident, $floor:ident, $bands:ident) 
         /// over the lines above its rows, the floor over its rows. After
         /// the floor's `build`, before its `publish`.
         fn update() {
-            let begin: u8 = $floor::begin();
+            let begin, lines = $floor::band();
             $bands::set_lines(0, begin);
-            $bands::set_lines(1, $floor::end() - begin);
+            $bands::set_lines(1, lines);
             $bands::fill_back();
             let k: u16 = $bands::back_index() as u16;
             let cam: *M7Camera = $floor::camera();
