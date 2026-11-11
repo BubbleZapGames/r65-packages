@@ -91,6 +91,7 @@ impl SceneHooks for Title {
 
 impl Scene for Title {
     fn load() {
+        INIDISP = FORCE_BLANK;          // load's job; FadeIn lights it
         set_main_layers!(0);
         set_backdrop!(0x3000);
     }
@@ -137,6 +138,7 @@ impl SceneHooks for Game {
 
 impl Scene for Game {
     fn load() {
+        INIDISP = FORCE_BLANK;          // load's job; MosaicIn lights it
         GAME.ticks = 0;
         GAME.hue = 0;
         checker_load();
@@ -213,6 +215,7 @@ impl SceneHooks for Over {
 
 impl Scene for Over {
     fn load() {
+        INIDISP = FORCE_BLANK;          // load's job; SlowFadeIn lights it
         set_main_layers!(0);
         set_backdrop!(0x0010);
     }

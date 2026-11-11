@@ -26,7 +26,8 @@ compile time.
 
 The controller never touches the PPU. Brightness, mosaic and the rest belong
 to the scenes and the transitions; `transitions.r65` has ready-made fades,
-mosaics and cuts.
+mosaics and cuts. A scene's `load` blanks the screen for its own work: see
+[Events](#events).
 
 | Event | Hook | Runs |
 |---|---|---|
@@ -88,7 +89,8 @@ impl SceneHooks for Title {
 
 impl Scene for Title {
     fn load() {
-        // The fade out left force blank on: DMA tiles, map and palette freely.
+        INIDISP = FORCE_BLANK;          // blanking is load's job; FadeIn lights it
+        // DMA tiles, map and palette freely.
         TITLE.blink = 0;
     }
 
@@ -135,10 +137,30 @@ come from `SceneHooks`, the rest from `Scene`.
 
 | Hook | When | Guarantees |
 |---|---|---|
-| `load()` | Brought on screen by `goto!` or `transition!` | No `nmi` runs until the In transition starts. The screen is as the Out transition left it: after a ready-made fade or mosaic, force blank, so DMA freely, over as many frames as it takes. With no Out (`SceneNone`), the screen is still lit. |
+| `load()` | Brought on screen by `goto!` or `transition!` | No `nmi` runs until the In transition starts. `load` is responsible for the blanking of the frame it loads in (see below). |
 | `update()` | Each frame while Active | The place for game logic and for navigation requests. Not called during a transition. |
 | `nmi()` | Each vblank after a completed frame, while Active | Never on a lag frame, never during a transition. Keep it to VRAM, CGRAM and OAM uploads. |
 | `unload()` | After Transition Out, when the scene is left | Undo the PPU state `load` set up that the next scene won't set for itself: HDMA, colour math, windows. |
+
+**Blanking is `load`'s job.** The controller never writes INIDISP, so `load`
+runs with the screen as the Out transition left it: force blank after a
+ready-made fade or mosaic and on the first request (`snes_init` leaves it
+on), but lit after `SceneNone`, `SceneCut` or a sepia. A `load` that writes
+VRAM, CGRAM or OAM sets force blank first, then DMAs freely over as many
+frames as it takes:
+
+```rust
+fn load() {
+    INIDISP = FORCE_BLANK;              // whatever the Out left
+    // DMA tiles, map, palette
+}
+```
+
+The screen comes back on through the In transition: a fade or mosaic in
+lights it from its first `nmi`. With no In (`goto!`, or `SceneNone` as the
+In), nothing else will, so `load` lights it itself as it finishes
+(`INIDISP = 15`). A `load` that writes no video memory can leave the screen
+as it is: see [A scene drawn over the last one](#a-scene-drawn-over-the-last-one).
 
 ## Navigation
 
@@ -155,8 +177,8 @@ Either can be `SceneNone`, for no transition: the controller skips it, so it
 moves straight on and the screen stays as it is. The game's first request has
 no scene to take off screen, so its Out is always `SceneNone`. `goto!(Next)`
 does what `transition!(Next, SceneNone, SceneNone)` does, without storing
-any transition: the scene changes at the frame boundary, and a scene that comes in that way turns the screen on itself, in
-`load`:
+any transition: the scene changes at the frame boundary, and a scene that
+comes in that way blanks and lights the screen itself, in `load`:
 
 ```rust
 SceneController::goto!(Title);                           // Title's load sets INIDISP
@@ -378,8 +400,8 @@ impl SceneTransition for HalfDim {
 
 A scene that comes in without blanking, such as a game-over page over the
 game, is a `transition!` whose transitions keep the screen lit and whose `load`
-writes no VRAM, CGRAM or OAM: the picture the last scene left stays on
-screen, and the new scene draws over it in `nmi`.
+writes no VRAM, CGRAM or OAM and so leaves the screen on: the picture the last
+scene left stays on screen, and the new scene draws over it in `nmi`.
 
 ```rust
 struct GameOver;

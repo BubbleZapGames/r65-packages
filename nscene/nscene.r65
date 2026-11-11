@@ -9,8 +9,9 @@
 //! absolute load. A transition is a type that implements `SceneHooks` and
 //! `SceneTransition` the same way. Each frame the controller calls the
 //! running hooks through a function pointer: the current scene's while it is
-//! Active, the transition's while one runs. It never touches the PPU.
-//! Transitions do: ready-made ones are in `nscene/transitions.r65`.
+//! Active, the transition's while one runs. It never touches the PPU: a
+//! scene's `load` blanks the screen for its own work, and transitions do the
+//! rest. Ready-made ones are in `nscene/transitions.r65`.
 //!
 //! Requests name the types: `SceneController::transition!(Game, FadeOut,
 //! FadeIn)`, or with no transitions, `SceneController::goto!(Game)`.
@@ -73,9 +74,14 @@ trait SceneHooks {
 /// Active; during its transitions only the transition's hooks run. Every hook
 /// here runs in the main loop.
 trait Scene: SceneHooks {
-    /// Load: set up VRAM, CGRAM, PPU registers and the scene's state. It runs
-    /// in whatever screen state the Transition Out left: after a fade to
-    /// force blank it may DMA freely and take many frames.
+    /// Load: set up VRAM, CGRAM, PPU registers and the scene's state. It
+    /// is responsible for the blanking of the frame it loads in: the screen
+    /// is as the Out transition left it, force blank after a ready-made fade
+    /// or mosaic but lit after `SceneNone` or `SceneCut`, so a `load` that
+    /// writes VRAM, CGRAM or OAM sets `INIDISP = FORCE_BLANK` first. In
+    /// force blank it may DMA freely and take many frames. With no In
+    /// transition (`goto!`, or an In of `SceneNone`) it also lights the
+    /// screen before it returns; an In fade lights it otherwise.
     fn load();
 
     /// After Transition Out, when the scene is left. Undo the PPU state
@@ -239,8 +245,8 @@ impl SceneController {
     }
 
     /// Changes to the scene `$next` at the next frame boundary, with no
-    /// transition: the screen stays as it is, and `$next`'s `load` turns it
-    /// on if it needs to. A type, not a value: `goto!(Title)`. False if the
+    /// transition: `$next`'s `load` blanks the screen for its work and lights
+    /// it again. A type, not a value: `goto!(Title)`. False if the
     /// controller is not Active or a request is pending.
     macro_rules! goto($next:ident) {
         SceneController::request!(
