@@ -187,7 +187,9 @@ already takes four, and pays nothing per row.
 
 The projections measure from the whole-texel camera the registers show,
 so sprites stay on the ground, and they follow the reflection. `to_world`
-says whether the point is on the map: always under `Wrap`.
+says whether the point is on the map: always under `Wrap`. In Mode 7 the
+map draws over sprites of priority 0, so a sprite placed with `to_screen`
+needs priority 1 or higher to stand on it.
 
 ## Static mode
 
