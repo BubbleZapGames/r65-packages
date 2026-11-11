@@ -1,5 +1,7 @@
 # mode7kit plain rotation example
 
+![The plain rotation view: the floor at a 22.5° pitch, under the Mode 1 sky](screenshot.png)
+
 The flyer's view with a true pitch: mode7kit's `M7PlainRotation` over its
 transport `M7HDMA`, under a Mode 1 sky. The sky is the flyer's own code,
 copied into `src/` (`bands.r65`, `horizon.r65`): `Horizon` over the plain

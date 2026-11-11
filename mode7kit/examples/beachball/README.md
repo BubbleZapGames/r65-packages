@@ -1,5 +1,7 @@
 # mode7kit beach ball example
 
+![The beach ball mid-bounce over the grass floor, under the COLDATA sky gradient](screenshot.png)
+
 A beach ball spins and bounces across a grass floor, with `static.r65`:
 `M7Static` moving one object rather than a view. The ball is the whole Mode 7
 layer, rotated for the spin and scaled on the screen axes for the squash.

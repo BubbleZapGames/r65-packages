@@ -135,6 +135,8 @@ M7PlainRotation::update();
 `examples/split/` are ROMs for each, with tests that drive them. `examples/beachball/` uses Static mode for
 a single object: a spinning, squashing ball over a sprite floor.
 
+![The beach ball example: an M7Static ball mid-bounce over a sprite floor, under a COLDATA sky gradient](examples/beachball/screenshot.png)
+
 ## Units
 
 | Quantity | Type | Meaning |

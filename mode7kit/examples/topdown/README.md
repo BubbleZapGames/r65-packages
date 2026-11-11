@@ -1,5 +1,7 @@
 # mode7kit top-down example
 
+![The top-down view: dizworld's map from above, turned and zoomed out, with the circular pool and trees](screenshot.png)
+
 dizworld's Mode 7 map seen from above, with `static.r65`: `M7Static`, one
 matrix a frame.
 

@@ -1,5 +1,7 @@
 # mode7kit flyer example
 
+![The flyer: a perspective floor over dizworld's lake, under the Mode 1 sky and its haze](screenshot.png)
+
 dizworld's Mode Y view: a perspective floor under a Mode 1 sky. The floor is
 mode7kit's default `M7Plain` over its transport `M7HDMA`. The sky is this
 example's own code (`src/bands.r65`, `src/horizon.r65`): `Horizon`, a sky

@@ -1,5 +1,7 @@
 # mode7kit split example
 
+![The split screen: two perspective floors, each under its own sky band, the bottom camera turned another way](screenshot.png)
+
 Two perspective floors on one screen, each following its own camera, as in
 a two-player racer: this example's own `m7k_split!` (`src/split.r65`) over
 two mode7kit floor instances, with per-line bands of its own
