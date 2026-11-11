@@ -87,7 +87,7 @@ trait Scene: SceneHooks {
 /// A transition between two scenes: its `update` (from `SceneHooks`) runs in
 /// the main loop and its `nmi` in vblank, once each per frame, until `done`
 /// returns true. The `nmi` half may write PPU registers. Its clock is
-/// `SceneController::frame!()`, the frames since it began, so a transition
+/// `SceneController::frame!()`, the vblanks since it began, so a transition
 /// needs no state of its own; one that wants some keeps it in a static.
 /// Every hook is required: a transition that has nothing to do in one writes
 /// an empty body.
@@ -148,13 +148,13 @@ struct SceneController {
     /// also every NMI while a `load` runs (it may take frames) and before
     /// `run` steps its first frame. Never reset; it wraps at 65535.
     lag: u16,
-    /// Frames since the running transition began; `frame!()` is its low
-    /// word.
+    /// Vblanks since the running transition began, every NMI counted, lag
+    /// frames included; `frame!()` is its low word. Reset when a transition
+    /// starts.
     frame: U32,
 }
 
-/// One frame, as a `U32`: what the controller adds to `frame` each frame of
-/// a transition.
+/// One vblank, as a `U32`: what `nmi!` adds to `frame` on every NMI.
 const SCENE_ONE_FRAME: U32 = U32!(1);
 
 /// No transition: `SceneNone`, for either transition of a `goto`. The
@@ -222,8 +222,10 @@ impl SceneController {
     /// The body of the game's NMI handler, the vblank half of a frame:
     /// `#[interrupt(nmi)] fn vblank() { SceneController::nmi!(); }`. Once the
     /// main loop has finished a frame, it calls the running scene's or
-    /// transition's `nmi`; otherwise it counts a lag frame. A macro, so it is
-    /// always inlined into the handler: one `JML [nmi]`, no call to reach it.
+    /// transition's `nmi`; otherwise it counts a lag frame. Either way it
+    /// then counts the vblank in `frame`, after the hook, so a transition's
+    /// first `nmi` sees `frame!()` at 0. A macro, so it is always
+    /// inlined into the handler: one `JML [nmi]`, no call to reach it.
     macro_rules! nmi() {
         clear_nmi!();
         if SCENE_CONTROLLER.frame_done == 0 {
@@ -233,6 +235,7 @@ impl SceneController {
             scene_nmi_hook();
             SCENE_CONTROLLER.frame_done = 0;
         }
+        SCENE_CONTROLLER.frame += SCENE_ONE_FRAME;
     }
 
     /// Changes to the scene `$next` at the next frame boundary, with no
@@ -271,11 +274,11 @@ impl SceneController {
         }
     }
 
-    /// Frames since the running transition began, as a `u16`: 0 in its
-    /// first `update` and `nmi`, 1 in its second, and in `done` from the
-    /// second frame on. The clock of every transition, so none keeps a
-    /// counter of its own. It is the low word of the `U32`
-    /// `SCENE_CONTROLLER.frame`, which counts on past 65535.
+    /// Vblanks since the running transition began, as a `u16`: 0 in its
+    /// first `update` and `nmi`, at least 1 in `done`, which is asked from its
+    /// second frame on. Every NMI counts, so a lag frame moves it on by more
+    /// than 1. The clock of every transition, so none keeps a counter of its
+    /// own. It is the low word of the `U32` `SCENE_CONTROLLER.frame`.
     macro_rules! frame() { SCENE_CONTROLLER.frame.lo }
 
     /// Records a request, if one is accepted now: the controller is Active
@@ -350,14 +353,12 @@ impl SceneController {
                 }
             }
             ScenePhase::Out => {
-                SCENE_CONTROLLER.frame += SCENE_ONE_FRAME;
                 let done: fn() -> bool = SCENE_CONTROLLER.trans_out.done;
                 if done() {
                     SceneController::switch();
                 }
             }
             ScenePhase::In => {
-                SCENE_CONTROLLER.frame += SCENE_ONE_FRAME;
                 let done: fn() -> bool = SCENE_CONTROLLER.trans_in.done;
                 if done() {
                     SceneController::activate();

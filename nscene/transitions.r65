@@ -2,7 +2,8 @@
 //! cuts.
 //!
 //! A transition is a type that implements `SceneTransition`. Its clock is the
-//! controller's `frame!()`, so it keeps no counter. The fades and mosaics
+//! controller's `frame!()`, the vblanks since it began, so it keeps no
+//! counter. The fades and mosaics
 //! here are made by macros, one type per length, which a request names:
 //!
 //! ```
@@ -27,8 +28,10 @@
 //! SceneController::transition!(Title, FadeOut, FadeInBy);
 //! ```
 //!
-//! A length is 1 to 255 frames: the level is `frames * 15 / length`, one
-//! hardware divide per frame. `scene_frames_transition!` makes a type of the
+//! A length is 1 to 255 vblanks: the level is `t * 15 / length`, with `t`
+//! the vblanks so far, one hardware divide per frame. A lag frame moves `t`
+//! on by more than 1, so a fade keeps its length in real time and skips a
+//! level. `scene_frames_transition!` makes a type of the
 //! same shape from a step macro of the game's own.
 //!
 //! The fades and mosaics do all their work in `nmi`, in vblank, where they
@@ -95,10 +98,10 @@ macro_rules! scene_mosaic_nmi($t:expr, $length:expr, $out:expr) {
     }
 }
 
-/// Defines the transition type `$name`, `$length` frames long (1 to 255):
-/// one frame of it is `$step!(frame, $length, $out)`, run from `nmi`, with
-/// `frame` the controller's `frame!()`. It is done once the frame passes the
-/// length, so `$step` writes the end state from frame `$length` on, as
+/// Defines the transition type `$name`, `$length` vblanks long (1 to 255):
+/// one frame of it is `$step!(t, $length, $out)`, run from `nmi`, with `t`
+/// the vblanks since it began, `frame!()`. It is done once that passes the
+/// length, so `$step` writes the end state from `$length` on, as
 /// `scene_fade_nmi!` and `scene_mosaic_nmi!` do.
 ///
 /// ```
@@ -168,15 +171,18 @@ impl SceneTransition for SceneCutBlank {
     fn done() -> bool { return true; }
 }
 
-/// The work area of `scene_sepia_out!`: the palette as it is on screen, and
-/// the sepia tone each colour is heading for. The game declares one, `#[ram]`.
+/// The work area of `scene_sepia_out!`: the palette as it is on screen, the
+/// sepia tone each colour is heading for, and the steps taken so far. The
+/// game declares one, `#[ram]`. `cur` comes first: the DMA moves it from the
+/// static's own address.
 struct ScenePalette {
     cur: [u16; 256],
     target: [u16; 256],
+    steps: u8,
 }
 
-/// Defines the transition type `$name`, a fade of every colour to sepia over
-/// 32 frames, with `$pal`, a `ScenePalette` static, as its work area. The
+/// Defines the transition type `$name`, a fade of every colour to sepia in 31
+/// steps, with `$pal`, a `ScenePalette` static, as its work area. The
 /// screen stays lit: the Out of a goto to a game-over scene that loads
 /// nothing, so the picture stays beneath it, sepia. It reads CGRAM, so any palette is turned.
 ///
@@ -185,16 +191,19 @@ struct ScenePalette {
 /// steps one level toward its tone, so 31 steps reach any of them. The first
 /// `nmi` reads CGRAM; from then on `update` works out the tones (once) and
 /// steps the palette in the main loop, and `nmi` uploads it with DMA
-/// channel 0.
+/// channel 0. It counts its own steps in `$pal.steps` rather than reading the
+/// vblank clock, so a lag frame delays a step but never skips one: every step
+/// is uploaded before it is done.
 macro_rules! scene_sepia_out($name:ident, $pal:ident) {
     struct $name;
 
     impl SceneHooks for $name {
         fn update() {
             if SceneController::frame!() == 0 {
+                $pal.steps = 0;
                 return;                         // CGRAM is not read yet
             }
-            if SceneController::frame!() == 1 {
+            if $pal.steps == 0 {
                 for i in 0..256 {
                     let mut g: u16 = ($pal.cur[i] >> 5) & 0x1F;
                     if g < 4 {
@@ -227,10 +236,11 @@ macro_rules! scene_sepia_out($name:ident, $pal:ident) {
                     $pal.cur[i] = n;
                 }
             }
+            $pal.steps++;
         }
 
         fn nmi() {
-            if SceneController::frame!() == 0 {
+            if $pal.steps == 0 {
                 // CGRAM into `cur`: reading $213B twice per colour, low then high.
                 CGADD = 0;
                 dma_set_src!(0, $pal);
@@ -244,6 +254,6 @@ macro_rules! scene_sepia_out($name:ident, $pal:ident) {
     }
 
     impl SceneTransition for $name {
-        fn done() -> bool { return SceneController::frame!() >= 32; }
+        fn done() -> bool { return $pal.steps >= 31; }
     }
 }

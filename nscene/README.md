@@ -237,9 +237,11 @@ When a transition starts, the controller sets its frame counter to 0, then
 each frame calls `update` and `nmi`, until `done` returns `true`. Setup a
 transition needs is its first frame's work: `frame!() == 0` in `update`.
 The counter is `SceneController::frame!()`: 0 in the first `update` and
-`nmi`, 1 in the second, and so on. The controller keeps it as a stdlib `U32`,
-`SCENE_CONTROLLER.frame`; `frame!()` is its low word, a `u16`, which is all a
-transition up to 65535 frames long needs. Only one transition runs at a time, so
+`nmi`, then one more for every vblank. The NMI counts it, lag frames included,
+so a slow frame moves it on by 2 or more and a fade keeps its length in real
+time. The controller keeps it as a stdlib `U32`, `SCENE_CONTROLLER.frame`;
+`frame!()` is its low word, a `u16`, which is all a transition up to 65535
+vblanks long needs. Only one transition runs at a time, so
 this one counter is every transition's clock, and a transition needs no RAM
 of its own. `done` is asked at the start of
 each frame from the second on, so the first `update` and `nmi` always run: a
@@ -283,7 +285,7 @@ request to name.
 ### Sepia
 
 `scene_sepia_out!(Type, PALETTE)` defines a transition type that turns every colour
-to a sepia tone over 32 frames and leaves the screen lit: the Out transition
+to a sepia tone in 31 steps and leaves the screen lit: the Out transition
 to a game-over scene that loads nothing, so the game's picture stays on
 screen beneath it. A tone comes from the green channel
 alone, at five eighths of its level (at least 4), with blue at half that, and
@@ -300,7 +302,8 @@ SceneController::transition!(GameOver, SepiaOut, SceneCut);
 Its first `nmi` reads the palette back from CGRAM, so it works on whatever is
 on screen. From then on its `update` steps all 256 colours in the main loop,
 and its `nmi` only uploads them with DMA channel 0: in the example the NMI
-takes about 4 scanlines.
+takes about 4 scanlines. It counts its steps in the palette's `steps` byte rather than
+reading `frame!()`, so a lag frame delays a step but never skips one.
 
 Once the game-over scene is current, the game's `nmi` no longer runs, so the
 sepia holds. To leave, `transition!` through a fade that blanks, to a scene whose
@@ -410,8 +413,9 @@ a far call through a pointer held in low RAM, `PHK / PEA / JML [hook]`,
 14 cycles there and 6 for the `RTL` back, with no dispatch table and no
 pointer to `self`. A hook then reads its state with absolute addressing.
 
-`nmi!` is a macro, so its body is always inlined into the NMI handler: the
-only call in vblank is the `nmi` hook itself.
+`nmi!` is a macro, so its body is always inlined into the NMI handler. Its
+calls in vblank are the `nmi` hook and the `U32` add that counts the vblank,
+`SCENE_CONTROLLER.frame += SCENE_ONE_FRAME`, about 130 cycles.
 
 A request expands, through the `SceneController::request!` macro, to a check
 that the controller is Active and then stores of the hooks of the types it
