@@ -15,6 +15,9 @@ None are released yet.
 
 | Package | Description |
 |---|---|
+| [mode7kit](mode7kit/README.md) | Mode 7: rotation, scaling, world coordinates with sprite projection, a perspective floor and split-screen floors |
+| [nscene](nscene/README.md) | Scenes and the transitions between them: a scene controller that runs the frame loop and the NMI, with ready-made fades and mosaics |
+| [uncompress](uncompress/README.md) | Decoders for every format `r65x packer` writes, from ROM into RAM |
 
 ## Using a package
 
