@@ -109,9 +109,9 @@ the requirements without compiling anything.
 
 Each package is released by itself, under a `<name>-vX.Y.Z` tag:
 
-1. Bump `version` in the package's `r65.toml` and commit the bump.
-2. Run `r65pkg tag tween` to create `tween-v0.2.0` from the committed version.
-3. Push the tag with `git push origin tween-v0.2.0`.
+1. In the package's directory, run `r65pkg tag 0.2.0`. It writes the version
+   into `r65.toml`, commits that file, and creates `tween-v0.2.0`.
+2. Push the commit and the tag with `git push origin main tween-v0.2.0`.
 
 The tag must agree with the manifest it points at. If it doesn't, a
 resolver refuses it, so tag only through `r65pkg tag`. Follow semver: while
